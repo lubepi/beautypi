@@ -1,0 +1,22 @@
+{
+  "colors": {
+    "model": "#d787af",
+    "path": "#00afaf",
+    "gitDirty": "warning",
+    "gitClean": "success",
+    "thinking": "thinkingOff",
+    "context": "dim",
+    "contextWarn": "warning",
+    "contextError": "error",
+    "cost": "text",
+    "tokens": "muted",
+    "separator": "dim",
+    "border": "borderMuted"
+  },
+  "icons": {
+    "model": "\uEC19",
+    "folder": "\uF115",
+    "branch": "\uF126",
+    "git": "\uF1D3"
+  }
+}

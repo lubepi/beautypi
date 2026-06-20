@@ -1,0 +1,54 @@
+{
+  "name": "beautypi",
+  "version": "1.0.0",
+  "description": "Beautypi — Splash screen + Powerline-style status bar for pi coding agent",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "coding-agent",
+    "splash",
+    "powerline",
+    "status-bar",
+    "extension"
+  ],
+  "license": "MIT",
+  "author": "Baishampayan Ghose, Nico Bailon",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ghoseb/pi-splash.git"
+  },
+  "files": [
+    "*.ts",
+    "*.md",
+    "*.json",
+    "!progress.md",
+    "editor.ts",
+    "fixed-editor/**/*.ts"
+  ],
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "lint": "oxlint .",
+    "fmt": "oxfmt .",
+    "fmt:check": "oxfmt --check .",
+    "check": "oxlint . && oxfmt --check .",
+    "test": "node --experimental-strip-types --test tests/**/*.test.ts"
+  },
+  "devDependencies": {
+    "oxfmt": "^0.35.0",
+    "oxlint": "^1.50.0",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
