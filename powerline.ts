@@ -8,7 +8,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { isKeyRelease, matchesKey, truncateToWidth, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir, hostname } from "node:os";
+import { homedir } from "node:os";
 
 import type { ColorScheme, SegmentContext, StatusLinePreset, StatusLineSegmentId } from "./types.ts";
 import type { PowerlineConfig } from "./powerline-config.ts";
@@ -558,18 +558,9 @@ function buildContentFromParts(
   return " " + parts.join(` ${sepStyled} `) + ansi.reset + " ";
 }
 
-interface LaidOutTopSegment {
-  id: StatusLineSegmentId;
-  /** Zero-based visible column where the segment starts (without the bar prefix). */
-  start: number;
-  /** Zero-based visible column where the segment ends (exclusive). */
-  end: number;
-}
-
 interface ResponsiveLayoutResult {
   topContent: string;
   secondaryContent: string;
-  topSegments: LaidOutTopSegment[];
 }
 
 function isFullscreenTui(tui: any): boolean {
@@ -610,7 +601,7 @@ function computeResponsiveLayout(
   }
 
   if (renderedSegments.length === 0) {
-    return { topContent: "", secondaryContent: "", topSegments: [] };
+    return { topContent: "", secondaryContent: "" };
   }
 
   // Calculate how many segments fit in top bar
@@ -648,17 +639,9 @@ function computeResponsiveLayout(
     }
   }
 
-  const laidOutTopSegments: LaidOutTopSegment[] = [];
-  let topOffset = 0;
-  for (const seg of topSegments) {
-    laidOutTopSegments.push({ id: seg.id, start: topOffset, end: topOffset + seg.width });
-    topOffset += seg.width + sepWidth;
-  }
-
   return {
     topContent: buildContentFromParts(topSegments.map((seg) => seg.content), presetDef, frameColor),
     secondaryContent: buildContentFromParts(secondarySegments, presetDef, frameColor),
-    topSegments: laidOutTopSegments,
   };
 }
 
@@ -1786,195 +1769,6 @@ export default function powerlineFooter(pi: ExtensionAPI) {
 
   let widgetRendersTopLine = true;
 
-  function formatUsageNumber(value: number): string {
-    if (!Number.isFinite(value) || value <= 0) return "0";
-    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-    if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
-    return String(Math.round(value));
-  }
-
-  function formatDuration(ms: number): string {
-    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-    if (hours > 0) return `${hours}h ${minutes}m`;
-    if (minutes > 0) return `${minutes}m ${seconds}s`;
-    return `${seconds}s`;
-  }
-
-  function buildSegmentInfo(segId: StatusLineSegmentId, theme: Theme): { title: string; lines: string[] } {
-    const segmentCtx = buildSegmentContext(currentCtx, theme);
-    const usage = segmentCtx.usageStats;
-    const sessionId = currentCtx?.sessionManager?.getSessionId?.();
-    const label = (name: string, value: string) => `${theme.fg("muted", `${name}:`)} ${value}`;
-
-    switch (segId) {
-      case "model":
-        return {
-          title: "Model",
-          lines: [
-            label("Modell", segmentCtx.model?.id ?? "unbekannt"),
-            label("Provider", segmentCtx.model?.provider ?? "unbekannt"),
-            label("Kontextfenster", segmentCtx.contextWindow ? formatUsageNumber(segmentCtx.contextWindow) : "unbekannt"),
-          ],
-        };
-      case "thinking":
-        return { title: "Thinking", lines: [label("Level", segmentCtx.thinkingLevel || "unbekannt")] };
-      case "path":
-        copyToClipboard(segmentCtx.cwd);
-        return { title: "Pfad", lines: [label("CWD", segmentCtx.cwd), theme.fg("dim", "In die Zwischenablage kopiert.")] };
-      case "git":
-        return {
-          title: "Git",
-          lines: [
-            label("Branch", segmentCtx.git.branch ?? "–"),
-            label("Staged", String(segmentCtx.git.staged)),
-            label("Unstaged", String(segmentCtx.git.unstaged)),
-            label("Untracked", String(segmentCtx.git.untracked)),
-          ],
-        };
-      case "context_pct":
-      case "context_total":
-        return {
-          title: "Kontext",
-          lines: [
-            label("Nutzung", `${segmentCtx.contextPercent}% von ${formatUsageNumber(segmentCtx.contextWindow)}`),
-            label("Auto-Compact", segmentCtx.autoCompactEnabled ? "an" : "aus"),
-            label("Custom Compaction", segmentCtx.customCompactionEnabled ? "an" : "aus"),
-          ],
-        };
-      case "token_in":
-        return { title: "Tokens (Input)", lines: [label("Input", formatUsageNumber(usage.input))] };
-      case "token_out":
-        return { title: "Tokens (Output)", lines: [label("Output", formatUsageNumber(usage.output))] };
-      case "token_total":
-        return {
-          title: "Tokens",
-          lines: [
-            label("Input", formatUsageNumber(usage.input)),
-            label("Output", formatUsageNumber(usage.output)),
-            label("Gesamt", formatUsageNumber(usage.input + usage.output)),
-          ],
-        };
-      case "cache_read":
-        return { title: "Cache (Read)", lines: [label("Cache Read", formatUsageNumber(usage.cacheRead))] };
-      case "cache_write":
-        return { title: "Cache (Write)", lines: [label("Cache Write", formatUsageNumber(usage.cacheWrite))] };
-      case "cost":
-        return {
-          title: "Kosten",
-          lines: [
-            label("Gesamt", `$${usage.cost.toFixed(4)}`),
-            label("Subscription", segmentCtx.usingSubscription ? "ja" : "nein"),
-          ],
-        };
-      case "session": {
-        const id = sessionId ?? "unbekannt";
-        if (sessionId) copyToClipboard(id);
-        return {
-          title: "Session",
-          lines: [label("ID", id), label("CWD", segmentCtx.cwd), theme.fg("dim", "ID in die Zwischenablage kopiert.")],
-        };
-      }
-      case "hostname":
-        return { title: "Host", lines: [label("Hostname", hostname())] };
-      case "time":
-        return { title: "Zeit", lines: [label("Jetzt", new Date().toLocaleTimeString())] };
-      case "time_spent":
-        return {
-          title: "Laufzeit",
-          lines: [
-            label("Session-Start", new Date(segmentCtx.sessionStartTime).toLocaleTimeString()),
-            label("Dauer", formatDuration(Date.now() - segmentCtx.sessionStartTime)),
-          ],
-        };
-      case "extension_statuses": {
-        const statuses = footerDataRef?.getExtensionStatuses() ?? new Map<string, string>();
-        const lines = [...statuses.entries()].map(([key, value]) => label(key, value));
-        return { title: "Extension-Status", lines: lines.length > 0 ? lines : [theme.fg("dim", "Keine Statusmeldungen")] };
-      }
-      case "subagents": {
-        const rendered = renderSegmentWithWidth("subagents", segmentCtx);
-        return { title: "Subagents", lines: [rendered.content || theme.fg("dim", "Keine Subagents aktiv")] };
-      }
-      case "shell_mode": {
-        const rendered = renderSegmentWithWidth("shell_mode", segmentCtx);
-        return { title: "Shell-Modus", lines: [rendered.content || theme.fg("dim", "Inaktiv")] };
-      }
-      default: {
-        const rendered = renderSegmentWithWidth(segId, segmentCtx);
-        return { title: String(segId), lines: [rendered.content || theme.fg("dim", "Keine Details verfügbar")] };
-      }
-    }
-  }
-
-  async function showSegmentInfo(ctx: any, theme: Theme, segId: StatusLineSegmentId): Promise<void> {
-    const { title, lines } = buildSegmentInfo(segId, theme);
-
-    const maxWidth = Math.max(visibleWidth(title) + 2, ...lines.map((line) => visibleWidth(line)), 24);
-    const termWidth = Math.max(40, tuiRef?.terminal?.columns ?? 100);
-    const overlayWidth = Math.min(maxWidth + 4, termWidth - 4);
-
-    if (typeof ctx?.ui?.custom === "function") {
-      try {
-        await ctx.ui.custom((_tui: any, overlayTheme: Theme, _keybindings: any, done: (result?: undefined) => void) => {
-          const close = () => done(undefined);
-          return {
-            dispose() {},
-            invalidate() {},
-            handleInput() {
-              close();
-            },
-            handleMouse() {
-              close();
-              return { handled: true };
-            },
-            render(width: number): string[] {
-              const boxWidth = Math.min(overlayWidth, Math.max(24, width - 2));
-              const innerWidth = Math.max(1, boxWidth - 4);
-              const border = (text: string) => overlayTheme.fg("border", text);
-              const out: string[] = [];
-
-              const titleText = ` ${title} `;
-              out.push(border("╭─" + titleText + "─".repeat(Math.max(0, boxWidth - 3 - visibleWidth(titleText))) + "╮"));
-
-              for (const line of lines) {
-                const truncated = truncateToWidth(line, innerWidth, "…");
-                const padding = Math.max(0, innerWidth - visibleWidth(truncated));
-                out.push(border("│ ") + truncated + " ".repeat(padding) + border(" │"));
-              }
-
-              const hint = " Esc/Klick: schließen ";
-              out.push(border("╰─" + hint + "─".repeat(Math.max(0, boxWidth - 3 - visibleWidth(hint))) + "╯"));
-              return out;
-            },
-          };
-        }, { overlay: true, overlayOptions: { width: overlayWidth, anchor: "center" } });
-        return;
-      } catch {
-        // Fall through to a notification when the overlay cannot be shown.
-      }
-    }
-
-    ctx.ui.notify(`${title}: ${lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "")).join(" · ")}`, "info");
-  }
-
-  function handlePowerlineBarClick(ctx: any, theme: Theme, event: any): { handled: boolean } | null {
-    try {
-      if (event?.type !== "click" || event.button !== "left" || event.y !== 0) return null;
-      const width = Math.max(1, event.width ?? tuiRef?.terminal?.columns ?? 80);
-      const layout = getResponsiveLayout(width, theme);
-      const x = event.x - 4; // bar prefix: "╭── "
-      const hit = layout.topSegments.find((segment) => x >= segment.start && x < segment.end);
-      if (!hit) return null;
-      void showSegmentInfo(ctx, theme, hit.id);
-      return { handled: true };
-    } catch {
-      return null;
-    }
-  }
-
   function installPowerlineWidgets(ctx: any, renderTopLine = true) {
     widgetRendersTopLine = renderTopLine;
 
@@ -1996,14 +1790,6 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       render(width: number): string[] {
         // In fullscreen mode the editor frame draws the bar itself.
         return widgetRendersTopLine ? renderPowerlineTopLines(width, currentCtx, theme) : [];
-      },
-      handleMouse(event: any): { handled: boolean } | undefined {
-        // Pi only synthesizes the "click" event for presses that a component
-        // claimed, so the left press on the bar row must be handled here.
-        if (event?.type === "press" && event.button === "left" && event.y === 0) {
-          return { handled: true };
-        }
-        return handlePowerlineBarClick(ctx, theme, event) ?? undefined;
       },
     }), { placement: "aboveEditor" });
 
@@ -2071,15 +1857,6 @@ export default function powerlineFooter(pi: ExtensionAPI) {
           : undefined,
         frameColor: fullscreenTui
           ? (text: string) => resolveFrameColor(ctx.ui.theme)(text)
-          : undefined,
-        onFrameBarClick: fullscreenTui
-          ? (x: number, width: number) => handlePowerlineBarClick(ctx, ctx.ui.theme, {
-              type: "click",
-              button: "left",
-              y: 0,
-              x,
-              width,
-            }) !== null
           : undefined,
         // Soft-cursor blink phase shared with the regular-mode cluster: Pi
         // never blinks the fullscreen cursor itself, the frame strips the

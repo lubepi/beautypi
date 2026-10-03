@@ -18,8 +18,6 @@ interface PowerlineEditorOptions {
   renderFrameBar?: (width: number, hiddenAbove: number) => string | null;
   /** Fullscreen only: frame stroke color (splash outline color). */
   frameColor?: (text: string) => string;
-  /** Fullscreen only: handles a click on the bar row (local x, component width). */
-  onFrameBarClick?: (x: number, width: number) => boolean;
   /** Fullscreen only: whether the soft cursor cell is currently visible (blink phase). */
   cursorBlinkVisible?: () => boolean;
 }
@@ -252,10 +250,6 @@ export class PowerlineEditor extends CustomEditor {
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.optionsRef.renderFrameBar) {
-      if (event.type === "click" && event.button === "left" && event.y === 0) {
-        const barHandled = this.optionsRef.onFrameBarClick?.(event.x, Math.max(1, event.width)) === true;
-        if (barHandled) return { handled: true, focus: true };
-      }
       event = this.mapFrameMouse(event);
     }
 
