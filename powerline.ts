@@ -1522,6 +1522,43 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     };
   }
 
+  /**
+   * Pi's renderer paints mouse selections cell by cell. For full- and
+   * multi-line selections that would invert the editor frame's own border
+   * glyphs ("│", "╰─ ", "╭── ") and copy them into the selection text.
+   * Clamp the selection columns of beautypi frame rows to the inner text
+   * area so the frame chrome stays unmarked.
+   */
+  function installFullscreenSelectionClamp(tui: any): void {
+    if (!isFullscreenTui(tui)) return;
+
+    try {
+      if (Reflect.get(tui, "beautypiSelectionClampPatched") === true) return;
+      const original = Reflect.get(tui, "getSelectionColumns");
+      if (typeof original !== "function") return;
+      Reflect.set(tui, "beautypiSelectionClampPatched", true);
+
+      // Frame rows carry a three-column border prefix and a matching suffix.
+      const FRAME_BORDER_WIDTH = 3;
+      const isFrameRow = (line: unknown): boolean => {
+        if (typeof line !== "string") return false;
+        const plain = line.replace(/\x1b\[[0-9;]*m/g, "");
+        return plain.startsWith("│  ") || plain.startsWith("╰─ ") || plain.startsWith("╭── ");
+      };
+
+      tui.getSelectionColumns = (line: string, row: number, selection: any, minColumn = 0, maxColumn = visibleWidth(line)) => {
+        if (isFrameRow(line)) {
+          const frameWidth = visibleWidth(line);
+          minColumn = Math.max(minColumn, FRAME_BORDER_WIDTH);
+          maxColumn = Math.min(maxColumn, Math.max(0, frameWidth - FRAME_BORDER_WIDTH));
+        }
+        return original.call(tui, line, row, selection, minColumn, maxColumn);
+      };
+    } catch {
+      // Keep Pi's default selection behavior when the renderer internals differ.
+    }
+  }
+
   function findContainerWithChild(tui: any, child: any): { container: any; index: number } | null {
     const children = Array.isArray(tui?.children) ? tui.children : [];
     const index = children.findIndex((candidate: any) => Array.isArray(candidate?.children) && candidate.children.includes(child));
@@ -1924,6 +1961,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       installFooterStatusRepaintHook(footerData);
       installFullscreenClipboardSemantics(tui);
       installFullscreenCursorTracking(tui);
+      installFullscreenSelectionClamp(tui);
 
       process.stdout.write("\x1b[?1004h");
 
