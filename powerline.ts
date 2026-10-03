@@ -1298,21 +1298,30 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   const MAX_FOOTER_LINES = 5;
   const MAX_CONTENT_LINES = 4;
 
-  function renderPowerlineTopLines(width: number, ctx: any, theme: Theme, mimicEditor = true): string[] {
-    if (!ctx) return [];
+  /** Render the powerline bar line (also used as the fullscreen editor frame top). */
+  function renderPowerlineBarLine(width: number, theme: Theme, hiddenAbove = 0): string | null {
+    if (!currentCtx) return null;
 
     const layout = getResponsiveLayout(width, theme);
-    if (!layout.topContent) return [];
+    if (!layout.topContent) return null;
 
     const bc = (s: string) => `${getFgAnsiCode("sep")}${s}${ansi.reset}`;
     const raw = layout.topContent;
     const stripped = raw.replace(/\x1b\[[0-9;]*m/g, "");
-    const visibleRawLen = visibleWidth(stripped);
+    const indicator = hiddenAbove > 0 ? ` ↑ ${hiddenAbove} more ` : "";
+    const visibleRawLen = visibleWidth(stripped) + visibleWidth(indicator);
 
     const fill = Math.max(0, width - visibleRawLen - 5);
-    const topLine = bc("╭── ") + raw.trim() + " " + bc("─".repeat(fill + 1)) + bc("╮");
+    return bc("╭── ") + raw.trim() + " " + (indicator ? bc(indicator) : "") + bc("─".repeat(fill + 1)) + bc("╮");
+  }
 
-    if (!mimicEditor) return [topLine];
+  function renderPowerlineTopLines(width: number, ctx: any, theme: Theme): string[] {
+    if (!ctx) return [];
+
+    const topLine = renderPowerlineBarLine(width, theme);
+    if (!topLine) return [];
+
+    const bc = (s: string) => `${getFgAnsiCode("sep")}${s}${ansi.reset}`;
 
     // Collect all visual lines from all editor lines with wrapping
     const fullText = (currentEditor?.getText?.() ?? ctx.ui?.getEditorText?.() ?? "").replace(/\r/g, "");
@@ -1687,7 +1696,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     fixedEditorCompositor.jumpToRootBottom();
   }
 
-  let widgetMimicEditor = true;
+  let widgetRendersTopLine = true;
 
   function formatUsageNumber(value: number): string {
     if (!Number.isFinite(value) || value <= 0) return "0";
@@ -1878,8 +1887,8 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     }
   }
 
-  function installPowerlineWidgets(ctx: any, mimicEditor = true) {
-    widgetMimicEditor = mimicEditor;
+  function installPowerlineWidgets(ctx: any, renderTopLine = true) {
+    widgetRendersTopLine = renderTopLine;
 
     ctx.ui.setWidget("powerline-status", () => ({
       dispose() {},
@@ -1897,7 +1906,8 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         resetLayoutCache();
       },
       render(width: number): string[] {
-        return renderPowerlineTopLines(width, currentCtx, theme, widgetMimicEditor);
+        // In fullscreen mode the editor frame draws the bar itself.
+        return widgetRendersTopLine ? renderPowerlineTopLines(width, currentCtx, theme) : [];
       },
       handleMouse(event: any): { handled: boolean } | undefined {
         // Pi only synthesizes the "click" event for presses that a component
@@ -1949,6 +1959,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         theme: editorTheme,
       });
 
+      const fullscreenTui = isFullscreenTui(tui);
       const editor = new PowerlineEditor(tui, editorTheme, keybindings, {
         keybindings,
         editorBoundaryShortcuts: {
@@ -1956,6 +1967,29 @@ export default function powerlineFooter(pi: ExtensionAPI) {
           end: resolvedShortcuts.editorEnd,
         },
         onNotify: (message, level = "info") => ctx.ui.notify(message, level),
+        // In fullscreen mode Pi renders the editor natively; rebuild the
+        // frame (bar, side borders, bottom cap) on top of its render output
+        // instead of using the terminal compositor. The editor factory only
+        // receives a minimal editor theme, so the full theme comes from
+        // ctx.ui.theme.
+        renderFrameBar: fullscreenTui
+          ? (width: number, hiddenAbove: number) => {
+              try {
+                return renderPowerlineBarLine(width, ctx.ui.theme, hiddenAbove);
+              } catch {
+                return null;
+              }
+            }
+          : undefined,
+        onFrameBarClick: fullscreenTui
+          ? (x: number, width: number) => handlePowerlineBarClick(ctx, ctx.ui.theme, {
+              type: "click",
+              button: "left",
+              y: 0,
+              x,
+              width,
+            }) !== null
+          : undefined,
       });
 
       currentEditor = editor;

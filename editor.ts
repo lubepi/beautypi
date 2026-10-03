@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { isKeyRelease, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
+import { isKeyRelease, truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import type { KeybindingsManager } from "@earendil-works/pi-coding-agent/dist/core/keybindings.js";
 import { readPrimarySelection } from "./clipboard.ts";
 import { matchesConfiguredShortcut } from "./shortcuts.ts";
@@ -14,12 +14,44 @@ interface PowerlineEditorOptions {
   keybindings: KeybindingsManager;
   editorBoundaryShortcuts?: EditorBoundaryShortcuts;
   onNotify: (message: string, level?: "info" | "warning" | "error") => void;
+  /** Fullscreen only: renders the powerline bar as the frame's top row. */
+  renderFrameBar?: (width: number, hiddenAbove: number) => string | null;
+  /** Fullscreen only: handles a click on the bar row (local x, component width). */
+  onFrameBarClick?: (x: number, width: number) => boolean;
 }
 
 const DEFAULT_EDITOR_BOUNDARY_SHORTCUTS: EditorBoundaryShortcuts = {
   start: "super+shift+up",
   end: "super+shift+down",
 };
+
+/** Parse "↑ 3 more" / "↓ 12 more" scroll hints from native border rows. */
+function hiddenLineCount(row: string, arrow: string): number {
+  const plain = row.replace(/\x1b\[[0-9;]*m/g, "");
+  const match = plain.match(new RegExp(`${arrow}\\s*(\\d+)\\s*more`));
+  return match ? Number.parseInt(match[1], 10) : 0;
+}
+
+function trimTrailingPadding(text: string): string {
+  let end = text.length;
+  while (end > 0 && text[end - 1] === " ") end--;
+  return text.slice(0, end);
+}
+
+/** Text row of the fullscreen frame: "│  text  │". */
+function frameBodyRow(row: string, width: number, border: (text: string) => string): string {
+  const content = truncateToWidth(trimTrailingPadding(row), Math.max(1, width - 6), "…");
+  const padding = Math.max(0, width - 6 - visibleWidth(content));
+  return border("│  ") + content + " ".repeat(padding) + border("  │");
+}
+
+/** Bottom row of the fullscreen frame: "╰─ text ───╯" with the last input line inside. */
+function frameCapRow(row: string, width: number, border: (text: string) => string, hiddenBelow: number): string {
+  const content = truncateToWidth(trimTrailingPadding(row), Math.max(1, width - 6), "…");
+  const indicator = hiddenBelow > 0 ? ` ↓ ${hiddenBelow} more ` : "";
+  const padding = Math.max(0, width - 5 - visibleWidth(content) - visibleWidth(indicator));
+  return border("╰─ ") + content + " ".repeat(padding) + (indicator ? border(indicator) : "") + border("─╯");
+}
 
 function isCommandUndoShortcut(data: string): boolean {
   return data === "\x1b[122;9u"
@@ -143,6 +175,46 @@ export class PowerlineEditor extends CustomEditor {
   }
 
   /**
+   * Fullscreen frame: replaces Pi's plain editor borders with the powerline
+   * bar (top row), side-bordered text rows and a rounded bottom cap that
+   * carries the last input line, matching the regular-mode cluster.
+   */
+  render(width: number): string[] {
+    const rows = super.render(width);
+    const renderBar = this.optionsRef.renderFrameBar;
+    if (!renderBar) return rows;
+
+    try {
+      const visibleLineCount = Number(Reflect.get(this, "renderedVisibleLineCount") ?? 0);
+      if (visibleLineCount < 1 || rows.length < visibleLineCount + 2) return rows;
+
+      const topRow = rows[0] ?? "";
+      const bottomRow = rows[visibleLineCount + 1] ?? "";
+      const textRows = rows.slice(1, 1 + visibleLineCount);
+      const autocompleteRows = rows.slice(2 + visibleLineCount);
+
+      const barLine = renderBar(width, hiddenLineCount(topRow, "↑"));
+      if (!barLine) return rows;
+
+      const borderColor = Reflect.get(this, "borderColor");
+      const border = typeof borderColor === "function"
+        ? (text: string) => String(borderColor(text))
+        : (text: string) => text;
+
+      const lines: string[] = [barLine];
+      for (const row of textRows.slice(0, -1)) {
+        lines.push(frameBodyRow(row, width, border));
+      }
+      lines.push(frameCapRow(textRows[textRows.length - 1] ?? "", width, border, hiddenLineCount(bottomRow, "↓")));
+      lines.push(...autocompleteRows);
+      return lines;
+    } catch {
+      // A broken frame must never take down the render loop.
+      return rows;
+    }
+  }
+
+  /**
    * Middle-click pastes the X11 primary selection (Pi's fullscreen mode does
    * not implement this itself). The cursor is positioned at the clicked cell
    * first by delegating a synthesized left click to the base editor.
@@ -152,6 +224,14 @@ export class PowerlineEditor extends CustomEditor {
    * middle click never reaches us.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (this.optionsRef.renderFrameBar) {
+      if (event.type === "click" && event.button === "left" && event.y === 0) {
+        const barHandled = this.optionsRef.onFrameBarClick?.(event.x, Math.max(1, event.width)) === true;
+        if (barHandled) return { handled: true, focus: true };
+      }
+      event = this.mapFrameMouse(event);
+    }
+
     if (event.button === "middle" && (event.type === "press" || event.type === "release")) {
       return { handled: true, focus: true };
     }
@@ -170,6 +250,24 @@ export class PowerlineEditor extends CustomEditor {
     }
 
     return super.handleMouse(event);
+  }
+
+  /**
+   * Translate mouse coordinates of the rebuilt fullscreen frame into the
+   * coordinate space the base editor expects: text and cap rows carry a
+   * three-column border prefix, and the autocomplete list sits one row higher
+   * because the frame replaces two native border rows with the bar and cap.
+   */
+  private mapFrameMouse(event: TuiMouseEvent): TuiMouseEvent {
+    const visibleLineCount = Number(Reflect.get(this, "renderedVisibleLineCount") ?? 0);
+    if (visibleLineCount < 1) return event;
+    if (event.y >= visibleLineCount + 1) {
+      return { ...event, y: event.y + 1 };
+    }
+    if (event.y >= 1) {
+      return { ...event, x: Math.max(0, event.x - 3) };
+    }
+    return event;
   }
 
   /**
