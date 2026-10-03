@@ -442,11 +442,12 @@ export class PowerlineEditor extends CustomEditor {
       const line = lines[startLine] ?? "";
       lines[startLine] = line.slice(0, startCol) + line.slice(endCol);
     } else {
-      // Multi-line: combine start of first line with end of last line
+      // Multi-line: join the kept head of the first line with the kept tail of
+      // the last line. Everything in between lies inside the selection and is
+      // deleted with it (it must not be re-appended).
       const first = (lines[startLine] ?? "").slice(0, startCol);
       const last = (lines[endLine] ?? "").slice(endCol);
-      const middle = lines.slice(startLine + 1, endLine);
-      lines.splice(startLine, endLine - startLine + 1, [first, ...middle, last].join(""));
+      lines.splice(startLine, endLine - startLine + 1, first + last);
     }
 
     Reflect.set(state, "cursorLine", startLine);
