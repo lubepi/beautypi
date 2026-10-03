@@ -817,7 +817,13 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     statusRenderScheduler.cancel();
     restoreFooterStatusRepaintHook?.();
     restoreFooterStatusRepaintHook = null;
-    teardownFixedEditorCompositor({ resetExtendedKeyboardModes: true });
+    // Keep the fixed-editor compositor installed until process exit. Pi stops
+    // the TUI first and then re-renders its default footer while disposing the
+    // runtime (resetExtensionUI via beforeSessionInvalidate). If the
+    // compositor had already left the alternate screen, those writes would
+    // land in the main screen and leave the built-in footer visible after
+    // quitting. The compositor's process-exit handler exits the alternate
+    // screen last, discarding everything painted during shutdown.
     currentCtx = null;
     footerDataRef = null;
     getThinkingLevelFn = null;

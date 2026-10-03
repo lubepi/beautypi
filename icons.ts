@@ -25,6 +25,7 @@ export const SEP_DOT = " · ";
 
 // Thinking level display text (Unicode/ASCII)
 export const THINKING_TEXT_UNICODE: Record<string, string> = {
+  off: "[off]",
   minimal: "[min]",
   low: "[low]",
   medium: "[med]",
@@ -35,6 +36,7 @@ export const THINKING_TEXT_UNICODE: Record<string, string> = {
 
 // Thinking level display text (Nerd Fonts - with icons)
 export const THINKING_TEXT_NERD: Record<string, string> = {
+  off: "\u{F011} off",       // power off
   minimal: "\u{F0E7} min",   // lightning bolt
   low: "\u{F10C} low",       // circle outline
   medium: "\u{F192} med",    // dot circle

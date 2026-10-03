@@ -1132,6 +1132,12 @@ export class TerminalSplitCompositor {
       + (activeMode ? disableExtendedKeyboardMode(activeMode) : "")
       + enableAlternateScrollMode()
       + exitAlternateScreen()
+      // 1049l restores the cursor to where the alternate screen was entered —
+      // inside the first frame pi painted into the main screen before the
+      // compositor took over. Wipe from that frame's top row down (the cursor
+      // sits one row below the editor's border) so no leftover chrome — editor
+      // border, default footer, separators — reappears when the shell returns.
+      + "\x1b[1A\r\x1b[0J\r\x1b[0J"
       + (restoreMainScreenMode && activeMode ? enableExtendedKeyboardMode(activeMode) : "")
       + (options.resetExtendedKeyboardModes ? resetExtendedKeyboardModes() : "")
       + endSynchronizedOutput(),

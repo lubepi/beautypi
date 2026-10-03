@@ -27,6 +27,8 @@ The splash screen appears automatically on session start.
 
 The powerline footer activates automatically. Toggle with `/powerline`, switch presets with `/powerline <name>`, fixed-editor mode with `/powerline fixed-editor on|off|toggle`.
 
+In fullscreen mode (`--tui-mode fullscreen`), pi reprints the whole screen as a transcript when quitting by default. Set `"fullscreenExitOutput": "resume-hint"` in `~/.pi/agent/settings.json` to leave the terminal clean on exit — only the shell prompt (and pi's resume hint, if a session file exists) remains.
+
 | Preset | Description |
 |--------|-------------|
 | `default` | Model, thinking, path (basename), git, context %, cache read, cost |
