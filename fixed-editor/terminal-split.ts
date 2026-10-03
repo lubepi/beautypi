@@ -660,7 +660,9 @@ export class TerminalSplitCompositor {
       for (const packet of mousePackets) {
         if (isMiddlePress(packet)) {
           const location = this.selectionLocationForPacket(packet);
-          const text = readPrimarySelection();
+          // Prefer the compositor's own active selection (the text the user
+          // just marked) over the X11 primary selection.
+          const text = this.getSelectedText() || readPrimarySelection();
           if (text && this.isOnEditorTextLocation(location) && this.onEditorTextClick) {
             const visLineIndex = location!.point.line - this.lastClusterRender!.editorTextStart!;
             this.onEditorTextClick(packet.col, visLineIndex);

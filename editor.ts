@@ -110,6 +110,8 @@ function droppedPathTextFromInput(data: string): string | null {
 export class PowerlineEditor extends CustomEditor {
   private readonly keybindingsRef: KeybindingsManager;
   private readonly optionsRef: PowerlineEditorOptions;
+  /** Text selection captured on middle press, before Pi clears it. */
+  private pendingMiddleSelection: string | null = null;
   /** Reference to the compositor for selection queries. */
   compositorRef: {
     getEditorSelectionRange: () => { startLine: number; startCol: number; endLine: number; endCol: number } | null;
@@ -232,12 +234,21 @@ export class PowerlineEditor extends CustomEditor {
       event = this.mapFrameMouse(event);
     }
 
-    if (event.button === "middle" && (event.type === "press" || event.type === "release")) {
+    if (event.button === "middle" && event.type === "press") {
+      // X11 middle click pastes the last text selection. Pi clears its
+      // selection when the press is handled, so capture the renderer's
+      // active selection text right now and prefer it over X11 primary.
+      this.pendingMiddleSelection = this.readRendererSelection() ?? null;
+      return { handled: true, focus: true };
+    }
+
+    if (event.button === "middle" && event.type === "release") {
       return { handled: true, focus: true };
     }
 
     if (event.type === "click" && event.button === "middle") {
-      const text = readPrimarySelection();
+      const text = this.pendingMiddleSelection ?? readPrimarySelection();
+      this.pendingMiddleSelection = null;
       if (text) {
         try {
           super.handleMouse({ ...event, button: "left" });
@@ -250,6 +261,19 @@ export class PowerlineEditor extends CustomEditor {
     }
 
     return super.handleMouse(event);
+  }
+
+  /** The fullscreen renderer's currently selected text, if any. */
+  private readRendererSelection(): string | undefined {
+    try {
+      const tui = Reflect.get(this, "tui");
+      const text = typeof tui?.getActiveSelectionText === "function"
+        ? tui.getActiveSelectionText()
+        : undefined;
+      return typeof text === "string" && text.length > 0 ? text : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**

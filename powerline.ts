@@ -548,13 +548,14 @@ function renderSegmentWithWidth(
 /** Build content string from pre-rendered parts */
 function buildContentFromParts(
   parts: string[],
-  presetDef: ReturnType<typeof getPreset>
+  presetDef: ReturnType<typeof getPreset>,
+  frameColor?: (text: string) => string
 ): string {
   if (parts.length === 0) return "";
   const separatorDef = getSeparator(presetDef.separator);
-  const sepAnsi = getFgAnsiCode("sep");
   const sep = separatorDef.left;
-  return " " + parts.join(` ${sepAnsi}${sep}${ansi.reset} `) + ansi.reset + " ";
+  const sepStyled = frameColor ? frameColor(sep) : `${getFgAnsiCode("sep")}${sep}${ansi.reset}`;
+  return " " + parts.join(` ${sepStyled} `) + ansi.reset + " ";
 }
 
 interface LaidOutTopSegment {
@@ -587,7 +588,8 @@ function isFullscreenTui(tui: any): boolean {
 function computeResponsiveLayout(
   ctx: SegmentContext,
   presetDef: ReturnType<typeof getPreset>,
-  availableWidth: number
+  availableWidth: number,
+  frameColor?: (text: string) => string
 ): ResponsiveLayoutResult {
   const separatorDef = getSeparator(presetDef.separator);
   const sepWidth = visibleWidth(separatorDef.left) + 2; // separator + spaces around it
@@ -654,8 +656,8 @@ function computeResponsiveLayout(
   }
 
   return {
-    topContent: buildContentFromParts(topSegments.map((seg) => seg.content), presetDef),
-    secondaryContent: buildContentFromParts(secondarySegments, presetDef),
+    topContent: buildContentFromParts(topSegments.map((seg) => seg.content), presetDef, frameColor),
+    secondaryContent: buildContentFromParts(secondarySegments, presetDef, frameColor),
     topSegments: laidOutTopSegments,
   };
 }
@@ -1238,7 +1240,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     const segmentCtx = buildSegmentContext(currentCtx, theme);
 
     lastLayoutWidth = width;
-    lastLayoutResult = computeResponsiveLayout(segmentCtx, presetDef, width);
+    lastLayoutResult = computeResponsiveLayout(segmentCtx, presetDef, width, resolveFrameColor(theme));
     lastLayoutTimestamp = now;
     layoutDirty = false;
     forceNextLayoutRecompute = false;
@@ -1298,6 +1300,32 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   const MAX_FOOTER_LINES = 5;
   const MAX_CONTENT_LINES = 4;
 
+  /**
+   * Color for the footer frame (bar outline, segment separators, side bars,
+   * bottom cap). Follows the active Pi theme: the same color Pi paints its
+   * editor strokes with (thinking level / bash mode aware), with a theme
+   * fallback.
+   */
+  function resolveFrameColor(theme: Theme): (text: string) => string {
+    const editorBorder = currentEditor ? Reflect.get(currentEditor, "borderColor") : undefined;
+    if (typeof editorBorder === "function") {
+      return (text: string) => {
+        try {
+          return String(editorBorder(text));
+        } catch {
+          return text;
+        }
+      };
+    }
+    return (text: string) => {
+      try {
+        return theme.fg("borderMuted", text);
+      } catch {
+        return text;
+      }
+    };
+  }
+
   /** Render the powerline bar line (also used as the fullscreen editor frame top). */
   function renderPowerlineBarLine(width: number, theme: Theme, hiddenAbove = 0): string | null {
     if (!currentCtx) return null;
@@ -1305,7 +1333,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     const layout = getResponsiveLayout(width, theme);
     if (!layout.topContent) return null;
 
-    const bc = (s: string) => `${getFgAnsiCode("sep")}${s}${ansi.reset}`;
+    const bc = resolveFrameColor(theme);
     const raw = layout.topContent;
     const stripped = raw.replace(/\x1b\[[0-9;]*m/g, "");
     const indicator = hiddenAbove > 0 ? ` ↑ ${hiddenAbove} more ` : "";
@@ -1321,7 +1349,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     const topLine = renderPowerlineBarLine(width, theme);
     if (!topLine) return [];
 
-    const bc = (s: string) => `${getFgAnsiCode("sep")}${s}${ansi.reset}`;
+    const bc = resolveFrameColor(theme);
 
     // Collect all visual lines from all editor lines with wrapping
     const fullText = (currentEditor?.getText?.() ?? ctx.ui?.getEditorText?.() ?? "").replace(/\r/g, "");
@@ -1409,10 +1437,11 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     return layout.secondaryContent ? [layout.secondaryContent] : [];
   }
 
-  function renderLastPromptLines(width: number): string[] {
+  function renderLastPromptLines(width: number, theme: Theme): string[] {
     if (!showLastPrompt || !lastUserPrompt) return [];
 
-    const prefix = ` ${getFgAnsiCode("sep")}\u21B3${ansi.reset} `;
+    const frameColor = resolveFrameColor(theme);
+    const prefix = ` ${frameColor("\u21B3")} `;
     const availableWidth = width - visibleWidth(prefix);
     if (availableWidth < 10) return [];
 
@@ -1421,7 +1450,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
 
     promptText = truncateToWidth(promptText, availableWidth, "\u2026");
 
-    const styledPrompt = `${getFgAnsiCode("sep")}${promptText}${ansi.reset}`;
+    const styledPrompt = frameColor(promptText);
     const line = `${prefix}${styledPrompt}`;
     return [truncateToWidth(line, width, "\u2026")];
   }
@@ -1929,11 +1958,11 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       },
     }), { placement: "belowEditor" });
 
-    ctx.ui.setWidget("powerline-last-prompt", () => ({
+    ctx.ui.setWidget("powerline-last-prompt", (_tui: any, theme: Theme) => ({
       dispose() {},
       invalidate() {},
       render(width: number): string[] {
-        return renderLastPromptLines(width);
+        return renderLastPromptLines(width, theme);
       },
     }), { placement: "belowEditor" });
   }
