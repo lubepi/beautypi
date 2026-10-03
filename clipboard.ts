@@ -23,3 +23,20 @@ export function readPrimarySelection(): string {
     return "";
   }
 }
+
+/**
+ * Write the X11 primary selection (the middle-click buffer). Best effort:
+ * silently does nothing when no supported tool is available.
+ */
+export function writePrimarySelection(text: string): void {
+  if (!text || process.platform !== "linux") return;
+
+  for (const command of ["xclip -selection primary", "xsel --primary", "wl-copy --primary"]) {
+    try {
+      execSync(command, { input: text, timeout: 2000, stdio: ["pipe", "ignore", "ignore"] });
+      return;
+    } catch {
+      // Try the next clipboard tool.
+    }
+  }
+}

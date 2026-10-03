@@ -5,8 +5,7 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { isKeyRelease, truncateToWidth, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
-import { execSync } from "node:child_process";
+import { isKeyRelease, matchesKey, truncateToWidth, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir, hostname } from "node:os";
@@ -21,6 +20,7 @@ import { getSeparator } from "./separators.ts";
 import { renderSegment } from "./segments.ts";
 import { getGitStatus, invalidateGitStatus, invalidateGitBranch } from "./git-status.ts";
 import { ansi, getFgAnsiCode } from "./colors.ts";
+import { writePrimarySelection } from "./clipboard.ts";
 import { createRenderScheduler } from "./render-scheduler.ts";
 import { readCoreContextUsage } from "./context-usage.ts";
 import { renderFixedEditorCluster } from "./fixed-editor/cluster.ts";
@@ -1472,6 +1472,43 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     fixedWidgetContainerBelow = null;
   }
 
+  /**
+   * Pi's fullscreen mode copies mouse selections to the system clipboard
+   * (`fullscreenCopyOnSelect`) and flashes "Copied!". Beautypi unifies the
+   * clipboard model with its regular-mode compositor instead: marking text
+   * writes the X11 primary selection (middle-click buffer), while an explicit
+   * Ctrl+Shift+C copies to the system clipboard.
+   */
+  function installFullscreenClipboardSemantics(tui: any): void {
+    if (!isFullscreenTui(tui)) return;
+
+    try {
+      if (Reflect.get(tui, "beautypiClipboardPatched") === true) return;
+      Reflect.set(tui, "beautypiClipboardPatched", true);
+
+      // Keep the release path active so the redirect below always runs.
+      if (typeof tui.setCopyOnSelect === "function") {
+        tui.setCopyOnSelect(true);
+      }
+
+      if (typeof tui.copySelectionToClipboard === "function") {
+        tui.copySelectionToClipboard = () => {
+          try {
+            const text = tui.getActiveSelectionText?.();
+            if (typeof text === "string" && text.length > 0) {
+              writePrimarySelection(text);
+            }
+          } catch {
+            // Clipboard sync is best effort.
+          }
+          return Promise.resolve(true);
+        };
+      }
+    } catch {
+      // Keep Pi's default behavior when the renderer internals differ.
+    }
+  }
+
   function findContainerWithChild(tui: any, child: any): { container: any; index: number } | null {
     const children = Array.isArray(tui?.children) ? tui.children : [];
     const index = children.findIndex((candidate: any) => Array.isArray(candidate?.children) && candidate.children.includes(child));
@@ -1515,15 +1552,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         down: resolvedShortcuts.scrollChatDown,
       },
       onCopySelection: (text) => {
-        if (process.platform === "linux") {
-          try {
-            execSync("xclip -selection primary", { input: text, timeout: 2000, stdio: ["pipe", "ignore", "ignore"] });
-          } catch {
-            try {
-              execSync("xsel --primary", { input: text, timeout: 2000, stdio: ["pipe", "ignore", "ignore"] });
-            } catch {}
-          }
-        }
+        writePrimarySelection(text);
       },
       onKeyboardCopy: (text) => {
         copyToClipboard(text);
@@ -2079,6 +2108,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         theme: footerTheme,
       });
       installFooterStatusRepaintHook(footerData);
+      installFullscreenClipboardSemantics(tui);
 
       process.stdout.write("\x1b[?1004h");
 
@@ -2105,6 +2135,21 @@ export default function powerlineFooter(pi: ExtensionAPI) {
             blinkOn = false;
             tuiRef?.requestRender();
             return { consume: true };
+          }
+          if (
+            isFullscreenTui(tui)
+            && !isKeyRelease(data)
+            && matchesKey(data, "ctrl+shift+c")
+          ) {
+            try {
+              const hasSelection = typeof tui.hasActiveSelection === "function" && tui.hasActiveSelection();
+              if (hasSelection && typeof tui.copyActiveSelectionToClipboard === "function") {
+                void tui.copyActiveSelectionToClipboard();
+                return { consume: true };
+              }
+            } catch {
+              // Fall through to the default key handling.
+            }
           }
           return undefined;
         });
