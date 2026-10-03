@@ -56,11 +56,9 @@ const modelSegment: StatusLineSegment = {
 
     if (opts.showThinkingLevel !== false && ctx.model?.reasoning) {
       const level = ctx.thinkingLevel || "off";
-      if (level !== "off") {
-        const thinkingText = getThinkingText(level);
-        if (thinkingText) {
-          content += `${SEP_DOT}${thinkingText}`;
-        }
+      const thinkingText = getThinkingText(level);
+      if (thinkingText) {
+        content += `${SEP_DOT}${thinkingText}`;
       }
     }
 
