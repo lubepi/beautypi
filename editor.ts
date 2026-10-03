@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { isKeyRelease, truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, isKeyRelease, truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import type { KeybindingsManager } from "@earendil-works/pi-coding-agent/dist/core/keybindings.js";
 import { readPrimarySelection } from "./clipboard.ts";
 import { matchesConfiguredShortcut } from "./shortcuts.ts";
@@ -20,6 +20,8 @@ interface PowerlineEditorOptions {
   frameColor?: (text: string) => string;
   /** Fullscreen only: handles a click on the bar row (local x, component width). */
   onFrameBarClick?: (x: number, width: number) => boolean;
+  /** Fullscreen only: whether the soft cursor cell is currently visible (blink phase). */
+  cursorBlinkVisible?: () => boolean;
 }
 
 const DEFAULT_EDITOR_BOUNDARY_SHORTCUTS: EditorBoundaryShortcuts = {
@@ -146,7 +148,7 @@ export class PowerlineEditor extends CustomEditor {
         || data === "\x08"
         || data === "\x1b[3~"
       ) {
-        if (this.deleteSelectionIfAny()) return;
+        if (this.deleteSelectionIfAny() || this.deleteFullscreenSelectionIfAny()) return;
         super.handleInput(data);
         return;
       }
@@ -168,7 +170,7 @@ export class PowerlineEditor extends CustomEditor {
       }
 
       // Any printable character: delete selection first, then insert
-      if (this.deleteSelectionIfAny()) {
+      if (this.deleteSelectionIfAny() || this.deleteFullscreenSelectionIfAny()) {
         // After deletion, re-insert the character via super
         super.handleInput(data);
         return;
@@ -208,11 +210,24 @@ export class PowerlineEditor extends CustomEditor {
           ? (text: string) => String(editorBorder(text))
           : (text: string) => text;
 
+      // Blink phase: drop Pi's inverse cursor cell while the soft cursor is
+      // hidden so the frame blinks like the regular-mode cluster (Pi itself
+      // never blinks the fullscreen cursor).
+      const blinkVisible = this.optionsRef.cursorBlinkVisible;
+      const stripHiddenCursor = (row: string): string => {
+        if (!blinkVisible || blinkVisible()) return row;
+        const markerIndex = row.indexOf(CURSOR_MARKER);
+        if (markerIndex < 0) return row;
+        const before = row.slice(0, markerIndex + CURSOR_MARKER.length);
+        const after = row.slice(markerIndex + CURSOR_MARKER.length);
+        return before + after.replace(/^\x1b\[7m[\s\S]*?\x1b\[0m/, (match) => match.slice(4, -4));
+      };
+
       const lines: string[] = [barLine];
       for (const row of textRows.slice(0, -1)) {
-        lines.push(frameBodyRow(row, width, border));
+        lines.push(frameBodyRow(stripHiddenCursor(row), width, border));
       }
-      lines.push(frameCapRow(textRows[textRows.length - 1] ?? "", width, border, hiddenLineCount(bottomRow, "↓")));
+      lines.push(frameCapRow(stripHiddenCursor(textRows[textRows.length - 1] ?? ""), width, border, hiddenLineCount(bottomRow, "↓")));
       lines.push(...autocompleteRows);
       return lines;
     } catch {
@@ -307,11 +322,6 @@ export class PowerlineEditor extends CustomEditor {
     const range = this.compositorRef?.getEditorSelectionRange();
     if (!range) return false;
 
-    const state = Reflect.get(this, "state");
-    if (!state || typeof state !== "object") return false;
-    const lines: string[] | undefined = Reflect.get(state, "lines");
-    if (!Array.isArray(lines)) return false;
-
     // Normalize: ensure start <= end
     const startLine = Math.min(range.startLine, range.endLine);
     const endLine = Math.max(range.startLine, range.endLine);
@@ -319,6 +329,113 @@ export class PowerlineEditor extends CustomEditor {
       Math.min(range.startCol, range.endCol);
     const endCol = range.startLine < range.endLine ? range.endCol :
       Math.max(range.startCol, range.endCol);
+
+    return this.deleteSelectionRange(startLine, startCol, endLine, endCol, () => this.compositorRef?.clearEditorSelection());
+  }
+
+  /**
+   * Fullscreen counterpart of {@link deleteSelectionIfAny}: Pi's renderer owns
+   * the mouse selection (screen coordinates) instead of the fixed-editor
+   * compositor, so translate it into input-line coordinates and delete the
+   * range. Positions come from the renderer's last frame: every frame parks
+   * the (hidden) hardware cursor on the marker cell of the focused editor, and
+   * installFullscreenCursorTracking records that screen row.
+   */
+  private deleteFullscreenSelectionIfAny(): boolean {
+    if (!this.optionsRef.renderFrameBar) return false;
+
+    try {
+      const tui = Reflect.get(this, "tui");
+      const bounds = typeof tui?.getSelectionBounds === "function" ? tui.getSelectionBounds() : undefined;
+      if (!bounds || bounds.start.scrollView || bounds.end.scrollView) return false;
+
+      const cursorScreenRow = Reflect.get(tui, "beautypiCursorScreenRow");
+      if (typeof cursorScreenRow !== "number") return false;
+
+      const layoutWidth = Number(Reflect.get(this, "lastWidth") ?? 0);
+      const scrollOffset = Number(Reflect.get(this, "scrollOffset") ?? 0);
+      const visibleLineCount = Number(Reflect.get(this, "renderedVisibleLineCount") ?? 0);
+      if (layoutWidth < 1 || visibleLineCount < 1) return false;
+
+      const layoutFn = Reflect.get(this, "layoutText");
+      if (typeof layoutFn !== "function") return false;
+      const layoutLines: Array<{ text?: string; hasCursor?: boolean; startIndex?: number }> =
+        layoutFn.call(this, layoutWidth);
+      if (!Array.isArray(layoutLines) || layoutLines.length === 0) return false;
+
+      let cursorLineIndex = layoutLines.findIndex((line) => line.hasCursor === true);
+      if (cursorLineIndex < 0) cursorLineIndex = 0;
+
+      // Screen rows covered by the visible input lines (0-based).
+      const topScreenRow = cursorScreenRow - (cursorLineIndex - scrollOffset);
+      if (bounds.start.row < topScreenRow || bounds.end.row > topScreenRow + visibleLineCount - 1) return false;
+
+      const layoutIndexStart = cursorLineIndex + (bounds.start.row - cursorScreenRow);
+      const layoutIndexEnd = cursorLineIndex + (bounds.end.row - cursorScreenRow);
+      if (layoutIndexStart < 0 || layoutIndexEnd >= layoutLines.length) return false;
+
+      // Map layout lines onto input lines, calibrated at the cursor line.
+      const state = Reflect.get(this, "state");
+      const cursorLine = Number(state && typeof state === "object" ? Reflect.get(state, "cursorLine") ?? 0 : 0);
+      const isLineStart = (entry: { startIndex?: number } | undefined): boolean =>
+        entry !== undefined && (entry.startIndex === undefined || entry.startIndex === 0);
+      const logicLineOf = new Map<number, number>();
+      logicLineOf.set(cursorLineIndex, cursorLine);
+      for (let i = cursorLineIndex + 1; i < layoutLines.length; i++) {
+        logicLineOf.set(i, (logicLineOf.get(i - 1) ?? cursorLine) + (isLineStart(layoutLines[i]) ? 1 : 0));
+      }
+      for (let i = cursorLineIndex - 1; i >= 0; i--) {
+        logicLineOf.set(i, (logicLineOf.get(i + 1) ?? cursorLine) - (isLineStart(layoutLines[i + 1]) ? 1 : 0));
+      }
+
+      // Frame text rows carry a three-column border prefix ("│  " / "╰─ ").
+      const FRAME_PREFIX_WIDTH = 3;
+      const logicColFor = (layoutIndex: number, screenCol: number): number => {
+        const entry = layoutLines[layoutIndex];
+        const startIndex = Number(entry?.startIndex ?? 0);
+        const visCol = Math.max(0, screenCol - FRAME_PREFIX_WIDTH);
+        const textLength = typeof entry?.text === "string" ? entry.text.length : 0;
+        return startIndex + Math.min(visCol, textLength);
+      };
+
+      const startLine = logicLineOf.get(layoutIndexStart);
+      const endLine = logicLineOf.get(layoutIndexEnd);
+      if (startLine === undefined || endLine === undefined || startLine > endLine) return false;
+
+      const startCol = logicColFor(layoutIndexStart, bounds.start.col);
+      let endCol = logicColFor(layoutIndexEnd, bounds.end.col);
+      if (!bounds.end.boundary) endCol += 1;
+      if (startLine === endLine && endCol <= startCol) return false;
+
+      const deleted = this.deleteSelectionRange(startLine, startCol, endLine, endCol, () => {
+        try {
+          Reflect.set(tui, "selectionAnchor", undefined);
+          Reflect.set(tui, "selectionFocus", undefined);
+          if (typeof tui.requestRender === "function") tui.requestRender();
+        } catch {
+          // Clearing the renderer selection is best effort.
+        }
+      });
+      return deleted;
+    } catch {
+      // A failed mapping must not swallow the key press.
+      return false;
+    }
+  }
+
+  /** Delete [startLine, startCol) .. [endLine, endCol) from the input lines. */
+  private deleteSelectionRange(
+    startLine: number,
+    startCol: number,
+    endLine: number,
+    endCol: number,
+    afterDelete?: () => void,
+  ): boolean {
+    const state = Reflect.get(this, "state");
+    if (!state || typeof state !== "object") return false;
+    const lines: string[] | undefined = Reflect.get(state, "lines");
+    if (!Array.isArray(lines)) return false;
+    if (startLine < 0 || endLine >= lines.length || startLine > endLine) return false;
 
     // Build new lines
     if (startLine === endLine) {
@@ -339,7 +456,7 @@ export class PowerlineEditor extends CustomEditor {
     Reflect.set(this, "preferredVisualCol", null);
     Reflect.set(this, "snappedFromCursorCol", null);
     this.tui?.requestRender();
-    this.compositorRef?.clearEditorSelection();
+    afterDelete?.();
 
     return true;
   }

@@ -1508,6 +1508,37 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     }
   }
 
+  /**
+   * Pi's fullscreen renderer parks the (hidden) hardware cursor on the marker
+   * cell of the focused component and ends every frame with
+   * `\x1b[<row>;<col>H\x1b[?25h|l`. Record that row on the renderer so the
+   * editor can translate mouse selections (screen coordinates) into
+   * input-line coordinates — e.g. to delete a marked range like an editor.
+   */
+  function installFullscreenCursorTracking(tui: any): void {
+    if (!isFullscreenTui(tui)) return;
+
+    const terminal = tui?.terminal;
+    if (!terminal || typeof terminal.write !== "function") return;
+    if (Reflect.get(terminal, "beautypiCursorTrackingPatched") === true) return;
+    Reflect.set(terminal, "beautypiCursorTrackingPatched", true);
+
+    const originalWrite = terminal.write.bind(terminal);
+    terminal.write = (data: string) => {
+      originalWrite(data);
+      if (typeof data !== "string" || !data.includes("\x1b[?25")) return;
+      try {
+        const parks = [...data.matchAll(/\x1b\[(\d+);\d+H\x1b\[\?25[hl]/g)];
+        const last = parks[parks.length - 1];
+        if (last) {
+          Reflect.set(tui, "beautypiCursorScreenRow", Number(last[1]) - 1);
+        }
+      } catch {
+        // Cursor tracking is best effort and must never break a frame write.
+      }
+    };
+  }
+
   function findContainerWithChild(tui: any, child: any): { container: any; index: number } | null {
     const children = Array.isArray(tui?.children) ? tui.children : [];
     const index = children.findIndex((candidate: any) => Array.isArray(candidate?.children) && candidate.children.includes(child));
@@ -2050,6 +2081,10 @@ export default function powerlineFooter(pi: ExtensionAPI) {
               width,
             }) !== null
           : undefined,
+        // Soft-cursor blink phase shared with the regular-mode cluster: Pi
+        // never blinks the fullscreen cursor itself, the frame strips the
+        // inverse cursor cell while hidden.
+        cursorBlinkVisible: () => hasFocus && (!isBlinking || blinkOn),
       });
 
       currentEditor = editor;
@@ -2111,6 +2146,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       });
       installFooterStatusRepaintHook(footerData);
       installFullscreenClipboardSemantics(tui);
+      installFullscreenCursorTracking(tui);
 
       process.stdout.write("\x1b[?1004h");
 
