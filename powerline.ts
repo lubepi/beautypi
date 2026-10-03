@@ -1302,26 +1302,19 @@ export default function powerlineFooter(pi: ExtensionAPI) {
 
   /**
    * Color for the footer frame (bar outline, segment separators, side bars,
-   * bottom cap). Follows the active Pi theme: the same color Pi paints its
-   * editor strokes with (thinking level / bash mode aware), with a theme
-   * fallback.
+   * bottom cap). Always the theme's border color — the same color as the
+   * splash screen outline — so it never changes with the thinking level.
    */
   function resolveFrameColor(theme: Theme): (text: string) => string {
-    const editorBorder = currentEditor ? Reflect.get(currentEditor, "borderColor") : undefined;
-    if (typeof editorBorder === "function") {
-      return (text: string) => {
+    return (text: string) => {
+      try {
+        return theme.fg("border", text);
+      } catch {
         try {
-          return String(editorBorder(text));
+          return theme.fg("borderMuted", text);
         } catch {
           return text;
         }
-      };
-    }
-    return (text: string) => {
-      try {
-        return theme.fg("borderMuted", text);
-      } catch {
-        return text;
       }
     };
   }
@@ -2038,6 +2031,9 @@ export default function powerlineFooter(pi: ExtensionAPI) {
                 return null;
               }
             }
+          : undefined,
+        frameColor: fullscreenTui
+          ? (text: string) => resolveFrameColor(ctx.ui.theme)(text)
           : undefined,
         onFrameBarClick: fullscreenTui
           ? (x: number, width: number) => handlePowerlineBarClick(ctx, ctx.ui.theme, {

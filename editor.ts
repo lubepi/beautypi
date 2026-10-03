@@ -16,6 +16,8 @@ interface PowerlineEditorOptions {
   onNotify: (message: string, level?: "info" | "warning" | "error") => void;
   /** Fullscreen only: renders the powerline bar as the frame's top row. */
   renderFrameBar?: (width: number, hiddenAbove: number) => string | null;
+  /** Fullscreen only: frame stroke color (splash outline color). */
+  frameColor?: (text: string) => string;
   /** Fullscreen only: handles a click on the bar row (local x, component width). */
   onFrameBarClick?: (x: number, width: number) => boolean;
 }
@@ -198,10 +200,13 @@ export class PowerlineEditor extends CustomEditor {
       const barLine = renderBar(width, hiddenLineCount(topRow, "↑"));
       if (!barLine) return rows;
 
-      const borderColor = Reflect.get(this, "borderColor");
-      const border = typeof borderColor === "function"
-        ? (text: string) => String(borderColor(text))
-        : (text: string) => text;
+      const frameColor = this.optionsRef.frameColor;
+      const editorBorder = Reflect.get(this, "borderColor");
+      const border = typeof frameColor === "function"
+        ? frameColor
+        : typeof editorBorder === "function"
+          ? (text: string) => String(editorBorder(text))
+          : (text: string) => text;
 
       const lines: string[] = [barLine];
       for (const row of textRows.slice(0, -1)) {
