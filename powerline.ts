@@ -9,7 +9,7 @@ import { isKeyRelease, truncateToWidth, TUI_KEYBINDINGS, visibleWidth } from "@e
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 
 import type { ColorScheme, SegmentContext, StatusLinePreset, StatusLineSegmentId } from "./types.ts";
 import type { PowerlineConfig } from "./powerline-config.ts";
@@ -557,6 +557,28 @@ function buildContentFromParts(
   return " " + parts.join(` ${sepAnsi}${sep}${ansi.reset} `) + ansi.reset + " ";
 }
 
+interface LaidOutTopSegment {
+  id: StatusLineSegmentId;
+  /** Zero-based visible column where the segment starts (without the bar prefix). */
+  start: number;
+  /** Zero-based visible column where the segment ends (exclusive). */
+  end: number;
+}
+
+interface ResponsiveLayoutResult {
+  topContent: string;
+  secondaryContent: string;
+  topSegments: LaidOutTopSegment[];
+}
+
+function isFullscreenTui(tui: any): boolean {
+  try {
+    return tui?.mode === "fullscreen";
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Responsive segment layout - fits segments into top bar, overflows to secondary row.
  * When terminal is wide enough, secondary segments move up to top bar.
@@ -566,7 +588,7 @@ function computeResponsiveLayout(
   ctx: SegmentContext,
   presetDef: ReturnType<typeof getPreset>,
   availableWidth: number
-): { topContent: string; secondaryContent: string } {
+): ResponsiveLayoutResult {
   const separatorDef = getSeparator(presetDef.separator);
   const sepWidth = visibleWidth(separatorDef.left) + 2; // separator + spaces around it
 
@@ -577,23 +599,23 @@ function computeResponsiveLayout(
   const allSegmentIds = [...primaryIds, ...secondaryIds];
 
   // Render all segments and get their widths
-  const renderedSegments: { content: string; width: number }[] = [];
+  const renderedSegments: { id: StatusLineSegmentId; content: string; width: number }[] = [];
   for (const segId of allSegmentIds) {
     const { content, width, visible } = renderSegmentWithWidth(segId, ctx);
     if (visible) {
-      renderedSegments.push({ content, width });
+      renderedSegments.push({ id: segId, content, width });
     }
   }
 
   if (renderedSegments.length === 0) {
-    return { topContent: "", secondaryContent: "" };
+    return { topContent: "", secondaryContent: "", topSegments: [] };
   }
 
   // Calculate how many segments fit in top bar
   // Account for: leading space (1) + trailing space (1) = 2 chars overhead
   const baseOverhead = 2;
   let currentWidth = baseOverhead;
-  let topSegments: string[] = [];
+  let topSegments: { id: StatusLineSegmentId; content: string; width: number }[] = [];
   let overflowSegments: { content: string; width: number }[] = [];
   let overflow = false;
 
@@ -601,7 +623,7 @@ function computeResponsiveLayout(
     const neededWidth = seg.width + (topSegments.length > 0 ? sepWidth : 0);
 
     if (!overflow && currentWidth + neededWidth <= availableWidth) {
-      topSegments.push(seg.content);
+      topSegments.push(seg);
       currentWidth += neededWidth;
     } else {
       overflow = true;
@@ -624,9 +646,17 @@ function computeResponsiveLayout(
     }
   }
 
+  const laidOutTopSegments: LaidOutTopSegment[] = [];
+  let topOffset = 0;
+  for (const seg of topSegments) {
+    laidOutTopSegments.push({ id: seg.id, start: topOffset, end: topOffset + seg.width });
+    topOffset += seg.width + sepWidth;
+  }
+
   return {
-    topContent: buildContentFromParts(topSegments, presetDef),
+    topContent: buildContentFromParts(topSegments.map((seg) => seg.content), presetDef),
     secondaryContent: buildContentFromParts(secondarySegments, presetDef),
+    topSegments: laidOutTopSegments,
   };
 }
 
@@ -679,7 +709,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
 
   // Cache for the top and secondary powerline widgets.
   let lastLayoutWidth = 0;
-  let lastLayoutResult: { topContent: string; secondaryContent: string } | null = null;
+  let lastLayoutResult: ResponsiveLayoutResult | null = null;
   let lastLayoutTimestamp = 0;
   let layoutDirty = true;
   let forceNextLayoutRecompute = false;
@@ -991,7 +1021,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       if (mouseScrollMatch) {
         const mode = mouseScrollMatch[1] ?? "toggle";
         config.mouseScroll = mode === "toggle" ? !config.mouseScroll : mode === "on";
-        if (enabled && ctx.hasUI && config.fixedEditor && tuiRef && currentEditor) {
+        if (enabled && ctx.hasUI && config.fixedEditor && tuiRef && currentEditor && !isFullscreenTui(tuiRef)) {
           installFixedEditorCompositor(ctx, tuiRef);
         }
 
@@ -1005,6 +1035,11 @@ export default function powerlineFooter(pi: ExtensionAPI) {
 
       const fixedEditorMatch = /^fixed-editor(?:\s+(on|off|toggle))?$/.exec(normalizedArgs);
       if (fixedEditorMatch) {
+        if (isFullscreenTui(tuiRef)) {
+          ctx.ui.notify("Fixed editor is regular-mode only; Pi manages layout and mouse in fullscreen", "info");
+          return;
+        }
+
         const mode = fixedEditorMatch[1] ?? "toggle";
         config.fixedEditor = mode === "toggle" ? !config.fixedEditor : mode === "on";
         if (enabled && ctx.hasUI) {
@@ -1182,7 +1217,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   /**
    * Get cached responsive layout or compute fresh one.
    */
-  function getResponsiveLayout(width: number, theme: Theme): { topContent: string; secondaryContent: string } {
+  function getResponsiveLayout(width: number, theme: Theme): ResponsiveLayoutResult {
     const now = Date.now();
     const cacheTtl = isStreaming ? STREAMING_LAYOUT_CACHE_TTL_MS : LAYOUT_CACHE_TTL_MS;
 
@@ -1263,7 +1298,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   const MAX_FOOTER_LINES = 5;
   const MAX_CONTENT_LINES = 4;
 
-  function renderPowerlineTopLines(width: number, ctx: any, theme: Theme): string[] {
+  function renderPowerlineTopLines(width: number, ctx: any, theme: Theme, mimicEditor = true): string[] {
     if (!ctx) return [];
 
     const layout = getResponsiveLayout(width, theme);
@@ -1276,6 +1311,8 @@ export default function powerlineFooter(pi: ExtensionAPI) {
 
     const fill = Math.max(0, width - visibleRawLen - 5);
     const topLine = bc("╭── ") + raw.trim() + " " + bc("─".repeat(fill + 1)) + bc("╮");
+
+    if (!mimicEditor) return [topLine];
 
     // Collect all visual lines from all editor lines with wrapping
     const fullText = (currentEditor?.getText?.() ?? ctx.ui?.getEditorText?.() ?? "").replace(/\r/g, "");
@@ -1408,7 +1445,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   function installFixedEditorCompositor(ctx: any, tui: any) {
     teardownFixedEditorCompositor();
 
-    if (!ctx.hasUI || !config.fixedEditor) return;
+    if (!ctx.hasUI || !config.fixedEditor || isFullscreenTui(tui)) return;
     if (!tui?.terminal || typeof tui.terminal.write !== "function") {
       throw new Error("[beautypi] Fixed editor compositor could not find tui.terminal.write()");
     }
@@ -1617,6 +1654,8 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   }
 
   function jumpToChatMessage(ctx: any, role: ChatJumpRole, direction: ChatJumpDirection): void {
+    if (isFullscreenTui(tuiRef)) return;
+
     if (!fixedEditorCompositor) {
       ctx.ui.notify("Chat message jumps require /powerline fixed-editor on", "warning");
       return;
@@ -1638,6 +1677,8 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   }
 
   function jumpChatToBottom(ctx: any): void {
+    if (isFullscreenTui(tuiRef)) return;
+
     if (!fixedEditorCompositor) {
       ctx.ui.notify("Chat bottom jump requires /powerline fixed-editor on", "warning");
       return;
@@ -1646,7 +1687,200 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     fixedEditorCompositor.jumpToRootBottom();
   }
 
-  function installPowerlineWidgets(ctx: any) {
+  let widgetMimicEditor = true;
+
+  function formatUsageNumber(value: number): string {
+    if (!Number.isFinite(value) || value <= 0) return "0";
+    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+    if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+    return String(Math.round(value));
+  }
+
+  function formatDuration(ms: number): string {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    if (minutes > 0) return `${minutes}m ${seconds}s`;
+    return `${seconds}s`;
+  }
+
+  function buildSegmentInfo(segId: StatusLineSegmentId, theme: Theme): { title: string; lines: string[] } {
+    const segmentCtx = buildSegmentContext(currentCtx, theme);
+    const usage = segmentCtx.usageStats;
+    const sessionId = currentCtx?.sessionManager?.getSessionId?.();
+    const label = (name: string, value: string) => `${theme.fg("muted", `${name}:`)} ${value}`;
+
+    switch (segId) {
+      case "model":
+        return {
+          title: "Model",
+          lines: [
+            label("Modell", segmentCtx.model?.id ?? "unbekannt"),
+            label("Provider", segmentCtx.model?.provider ?? "unbekannt"),
+            label("Kontextfenster", segmentCtx.contextWindow ? formatUsageNumber(segmentCtx.contextWindow) : "unbekannt"),
+          ],
+        };
+      case "thinking":
+        return { title: "Thinking", lines: [label("Level", segmentCtx.thinkingLevel || "unbekannt")] };
+      case "path":
+        copyToClipboard(segmentCtx.cwd);
+        return { title: "Pfad", lines: [label("CWD", segmentCtx.cwd), theme.fg("dim", "In die Zwischenablage kopiert.")] };
+      case "git":
+        return {
+          title: "Git",
+          lines: [
+            label("Branch", segmentCtx.git.branch ?? "–"),
+            label("Staged", String(segmentCtx.git.staged)),
+            label("Unstaged", String(segmentCtx.git.unstaged)),
+            label("Untracked", String(segmentCtx.git.untracked)),
+          ],
+        };
+      case "context_pct":
+      case "context_total":
+        return {
+          title: "Kontext",
+          lines: [
+            label("Nutzung", `${segmentCtx.contextPercent}% von ${formatUsageNumber(segmentCtx.contextWindow)}`),
+            label("Auto-Compact", segmentCtx.autoCompactEnabled ? "an" : "aus"),
+            label("Custom Compaction", segmentCtx.customCompactionEnabled ? "an" : "aus"),
+          ],
+        };
+      case "token_in":
+        return { title: "Tokens (Input)", lines: [label("Input", formatUsageNumber(usage.input))] };
+      case "token_out":
+        return { title: "Tokens (Output)", lines: [label("Output", formatUsageNumber(usage.output))] };
+      case "token_total":
+        return {
+          title: "Tokens",
+          lines: [
+            label("Input", formatUsageNumber(usage.input)),
+            label("Output", formatUsageNumber(usage.output)),
+            label("Gesamt", formatUsageNumber(usage.input + usage.output)),
+          ],
+        };
+      case "cache_read":
+        return { title: "Cache (Read)", lines: [label("Cache Read", formatUsageNumber(usage.cacheRead))] };
+      case "cache_write":
+        return { title: "Cache (Write)", lines: [label("Cache Write", formatUsageNumber(usage.cacheWrite))] };
+      case "cost":
+        return {
+          title: "Kosten",
+          lines: [
+            label("Gesamt", `$${usage.cost.toFixed(4)}`),
+            label("Subscription", segmentCtx.usingSubscription ? "ja" : "nein"),
+          ],
+        };
+      case "session": {
+        const id = sessionId ?? "unbekannt";
+        if (sessionId) copyToClipboard(id);
+        return {
+          title: "Session",
+          lines: [label("ID", id), label("CWD", segmentCtx.cwd), theme.fg("dim", "ID in die Zwischenablage kopiert.")],
+        };
+      }
+      case "hostname":
+        return { title: "Host", lines: [label("Hostname", hostname())] };
+      case "time":
+        return { title: "Zeit", lines: [label("Jetzt", new Date().toLocaleTimeString())] };
+      case "time_spent":
+        return {
+          title: "Laufzeit",
+          lines: [
+            label("Session-Start", new Date(segmentCtx.sessionStartTime).toLocaleTimeString()),
+            label("Dauer", formatDuration(Date.now() - segmentCtx.sessionStartTime)),
+          ],
+        };
+      case "extension_statuses": {
+        const statuses = footerDataRef?.getExtensionStatuses() ?? new Map<string, string>();
+        const lines = [...statuses.entries()].map(([key, value]) => label(key, value));
+        return { title: "Extension-Status", lines: lines.length > 0 ? lines : [theme.fg("dim", "Keine Statusmeldungen")] };
+      }
+      case "subagents": {
+        const rendered = renderSegmentWithWidth("subagents", segmentCtx);
+        return { title: "Subagents", lines: [rendered.content || theme.fg("dim", "Keine Subagents aktiv")] };
+      }
+      case "shell_mode": {
+        const rendered = renderSegmentWithWidth("shell_mode", segmentCtx);
+        return { title: "Shell-Modus", lines: [rendered.content || theme.fg("dim", "Inaktiv")] };
+      }
+      default: {
+        const rendered = renderSegmentWithWidth(segId, segmentCtx);
+        return { title: String(segId), lines: [rendered.content || theme.fg("dim", "Keine Details verfügbar")] };
+      }
+    }
+  }
+
+  async function showSegmentInfo(ctx: any, theme: Theme, segId: StatusLineSegmentId): Promise<void> {
+    const { title, lines } = buildSegmentInfo(segId, theme);
+
+    const maxWidth = Math.max(visibleWidth(title) + 2, ...lines.map((line) => visibleWidth(line)), 24);
+    const termWidth = Math.max(40, tuiRef?.terminal?.columns ?? 100);
+    const overlayWidth = Math.min(maxWidth + 4, termWidth - 4);
+
+    if (typeof ctx?.ui?.custom === "function") {
+      try {
+        await ctx.ui.custom((_tui: any, overlayTheme: Theme, _keybindings: any, done: (result?: undefined) => void) => {
+          const close = () => done(undefined);
+          return {
+            dispose() {},
+            invalidate() {},
+            handleInput() {
+              close();
+            },
+            handleMouse() {
+              close();
+              return { handled: true };
+            },
+            render(width: number): string[] {
+              const boxWidth = Math.min(overlayWidth, Math.max(24, width - 2));
+              const innerWidth = Math.max(1, boxWidth - 4);
+              const border = (text: string) => overlayTheme.fg("border", text);
+              const out: string[] = [];
+
+              const titleText = ` ${title} `;
+              out.push(border("╭─" + titleText + "─".repeat(Math.max(0, boxWidth - 3 - visibleWidth(titleText))) + "╮"));
+
+              for (const line of lines) {
+                const truncated = truncateToWidth(line, innerWidth, "…");
+                const padding = Math.max(0, innerWidth - visibleWidth(truncated));
+                out.push(border("│ ") + truncated + " ".repeat(padding) + border(" │"));
+              }
+
+              const hint = " Esc/Klick: schließen ";
+              out.push(border("╰─" + hint + "─".repeat(Math.max(0, boxWidth - 3 - visibleWidth(hint))) + "╯"));
+              return out;
+            },
+          };
+        }, { overlay: true, overlayOptions: { width: overlayWidth, anchor: "center" } });
+        return;
+      } catch {
+        // Fall through to a notification when the overlay cannot be shown.
+      }
+    }
+
+    ctx.ui.notify(`${title}: ${lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "")).join(" · ")}`, "info");
+  }
+
+  function handlePowerlineBarClick(ctx: any, theme: Theme, event: any): { handled: boolean } | null {
+    try {
+      if (event?.type !== "click" || event.button !== "left" || event.y !== 0) return null;
+      const width = Math.max(1, event.width ?? tuiRef?.terminal?.columns ?? 80);
+      const layout = getResponsiveLayout(width, theme);
+      const x = event.x - 4; // bar prefix: "╭── "
+      const hit = layout.topSegments.find((segment) => x >= segment.start && x < segment.end);
+      if (!hit) return null;
+      void showSegmentInfo(ctx, theme, hit.id);
+      return { handled: true };
+    } catch {
+      return null;
+    }
+  }
+
+  function installPowerlineWidgets(ctx: any, mimicEditor = true) {
+    widgetMimicEditor = mimicEditor;
+
     ctx.ui.setWidget("powerline-status", () => ({
       dispose() {},
       invalidate() {
@@ -1663,7 +1897,15 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         resetLayoutCache();
       },
       render(width: number): string[] {
-        return renderPowerlineTopLines(width, currentCtx, theme);
+        return renderPowerlineTopLines(width, currentCtx, theme, widgetMimicEditor);
+      },
+      handleMouse(event: any): { handled: boolean } | undefined {
+        // Pi only synthesizes the "click" event for presses that a component
+        // claimed, so the left press on the bar row must be handled here.
+        if (event?.type === "press" && event.button === "left" && event.y === 0) {
+          return { handled: true };
+        }
+        return handlePowerlineBarClick(ctx, theme, event) ?? undefined;
       },
     }), { placement: "aboveEditor" });
 
@@ -1736,7 +1978,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
             && typeof Reflect.get(candidate, "getSuggestions") === "function";
           if (!hasProvider) {
             ctx.ui.setEditorComponent(editorFactory);
-            if (config.fixedEditor && tuiRef) {
+            if (config.fixedEditor && tuiRef && !isFullscreenTui(tuiRef)) {
               installFixedEditorCompositor(ctx, tuiRef);
             }
             currentEditor?.handleInput(data);
@@ -1747,15 +1989,17 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         originalHandleInput(data);
       };
 
-      const originalRender = editor.render.bind(editor);
-      editor.render = (width: number): string[] => {
-        if (width < 10) return originalRender(width);
-        if (editor.autocompleteState && editor.autocompleteList) {
-          const contentWidth = Math.max(1, width - (editor.paddingX || 0) * 2);
-          return editor.autocompleteList.render(contentWidth);
-        }
-        return [];
-      };
+      if (!isFullscreenTui(tui)) {
+        const originalRender = editor.render.bind(editor);
+        editor.render = (width: number): string[] => {
+          if (width < 10) return originalRender(width);
+          if (editor.autocompleteState && editor.autocompleteList) {
+            const contentWidth = Math.max(1, width - (editor.paddingX || 0) * 2);
+            return editor.autocompleteList.render(contentWidth);
+          }
+          return [];
+        };
+      }
 
       return editor;
     };
@@ -1849,12 +2093,14 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       };
     });
 
-    if (config.fixedEditor) {
+    if (isFullscreenTui(tuiRef)) {
+      installPowerlineWidgets(ctx, false);
+    } else if (config.fixedEditor) {
       if (tuiRef) {
         installFixedEditorCompositor(ctx, tuiRef);
       }
     } else {
-      installPowerlineWidgets(ctx);
+      installPowerlineWidgets(ctx, true);
     }
   }
 }

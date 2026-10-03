@@ -1,7 +1,7 @@
 import { isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { readPrimarySelection } from "../clipboard.ts";
 import { matchesConfiguredShortcut } from "../shortcuts.ts";
 import type { FixedEditorClusterRender } from "./cluster.ts";
-import { execSync } from "node:child_process";
 
 export interface TerminalLike {
   columns: number;
@@ -225,25 +225,6 @@ function isRightPress(packet: SgrMousePacket): boolean {
 
 function isMiddlePress(packet: SgrMousePacket): boolean {
   return packet.final === "M" && mouseBaseButton(packet.code) === 1 && (packet.code & 32) === 0;
-}
-
-function readPrimarySelection(): string {
-  try {
-    let text: string;
-    if (process.platform === "darwin") {
-      text = execSync("pbpaste", { encoding: "utf8", timeout: 500 });
-    } else if (process.platform === "win32") {
-      text = execSync("powershell -command Get-Clipboard", { encoding: "utf8", timeout: 1000 });
-    } else {
-      text = execSync(
-        "xclip -o -selection primary 2>/dev/null || xsel -o -p 2>/dev/null || wl-paste -p 2>/dev/null",
-        { encoding: "utf8", timeout: 1000, shell: true },
-      );
-    }
-    return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
-  } catch {
-    return "";
-  }
 }
 
 function isMouseRelease(packet: SgrMousePacket): boolean {

@@ -1,7 +1,8 @@
 import { fileURLToPath } from "node:url";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { isKeyRelease } from "@earendil-works/pi-tui";
+import { isKeyRelease, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import type { KeybindingsManager } from "@earendil-works/pi-coding-agent/dist/core/keybindings.js";
+import { readPrimarySelection } from "./clipboard.ts";
 import { matchesConfiguredShortcut } from "./shortcuts.ts";
 
 interface EditorBoundaryShortcuts {
@@ -139,6 +140,36 @@ export class PowerlineEditor extends CustomEditor {
 
       super.handleInput(data);
     }
+  }
+
+  /**
+   * Middle-click pastes the X11 primary selection (Pi's fullscreen mode does
+   * not implement this itself). The cursor is positioned at the clicked cell
+   * first by delegating a synthesized left click to the base editor.
+   *
+   * Pi only synthesizes the "click" event for presses that a component
+   * claimed, so the middle press/release must be handled here; otherwise the
+   * middle click never reaches us.
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.button === "middle" && (event.type === "press" || event.type === "release")) {
+      return { handled: true, focus: true };
+    }
+
+    if (event.type === "click" && event.button === "middle") {
+      const text = readPrimarySelection();
+      if (text) {
+        try {
+          super.handleMouse({ ...event, button: "left" });
+        } catch {
+          // Cursor positioning is best-effort; the paste still happens below.
+        }
+        this.insertTextAtCursor(text);
+      }
+      return { handled: true, focus: true };
+    }
+
+    return super.handleMouse(event);
   }
 
   /**
