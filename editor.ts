@@ -5,8 +5,8 @@ import type { KeybindingsManager } from "@earendil-works/pi-coding-agent/dist/co
 import { matchesConfiguredShortcut } from "./shortcuts.ts";
 
 interface EditorBoundaryShortcuts {
-  start: string;
-  end: string;
+  start: string | null;
+  end: string | null;
 }
 
 interface PowerlineEditorOptions {

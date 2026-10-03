@@ -11,8 +11,8 @@ export interface TerminalLike {
 }
 
 interface KeyboardScrollShortcuts {
-  up: string;
-  down: string;
+  up: string | null;
+  down: string | null;
 }
 
 interface TerminalSplitCompositorOptions {

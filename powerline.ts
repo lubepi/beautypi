@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import type { ColorScheme, SegmentContext, StatusLinePreset, StatusLineSegmentId } from "./types.ts";
 import type { PowerlineConfig } from "./powerline-config.ts";
 import { PowerlineEditor } from "./editor.ts";
+import { installStartupResourceGating } from "./startup-resources.ts";
 import { getPreset, PRESETS } from "./presets.ts";
 import { collectHiddenExtensionStatusKeys, getNotificationExtensionStatuses, mergeSegmentOptions, mergeSegmentsWithCustomItems, nextPowerlineSettingWithOptions, nextPowerlineSettingWithPreset, parsePowerlineConfig } from "./powerline-config.ts";
 import { getSeparator } from "./separators.ts";
@@ -43,18 +44,20 @@ let config: PowerlineConfig = {
 const CUSTOM_COMPACTION_STATUS_KEY = "compact-policy";
 let customCompactionEnabled = false;
 
+type ShortcutBinding = string | null;
+
 interface PowerlineShortcuts {
-  copyEditor: string;
-  cutEditor: string;
-  jumpPreviousUserMessage: string;
-  jumpNextUserMessage: string;
-  jumpPreviousLlmMessage: string;
-  jumpNextLlmMessage: string;
-  jumpChatBottom: string;
-  scrollChatUp: string;
-  scrollChatDown: string;
-  editorStart: string;
-  editorEnd: string;
+  copyEditor: ShortcutBinding;
+  cutEditor: ShortcutBinding;
+  jumpPreviousUserMessage: ShortcutBinding;
+  jumpNextUserMessage: ShortcutBinding;
+  jumpPreviousLlmMessage: ShortcutBinding;
+  jumpNextLlmMessage: ShortcutBinding;
+  jumpChatBottom: ShortcutBinding;
+  scrollChatUp: ShortcutBinding;
+  scrollChatDown: ShortcutBinding;
+  editorStart: ShortcutBinding;
+  editorEnd: ShortcutBinding;
 }
 
 type PowerlineShortcutKey = keyof PowerlineShortcuts;
@@ -82,7 +85,7 @@ const DEFAULT_SHORTCUTS: PowerlineShortcuts = {
   jumpNextUserMessage: "ctrl+shift+i",
   jumpPreviousLlmMessage: "ctrl+alt+,",
   jumpNextLlmMessage: "ctrl+alt+.",
-  jumpChatBottom: "ctrl+shift+g",
+  jumpChatBottom: "ctrl+alt+g",
   scrollChatUp: "super+up",
   scrollChatDown: "super+down",
   editorStart: "super+shift+up",
@@ -454,20 +457,26 @@ function shortcutUsageKey(shortcut: string): string {
   return shortcutConflictKey(normalizeShortcut(shortcut));
 }
 
+function parseShortcutSetting(value: unknown): ShortcutBinding | undefined {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  return parseShortcutOverride(value) ?? undefined;
+}
+
 function findShortcutReplacement(key: PowerlineShortcutKey, used: Set<string>): string | null {
   const preferred = DEFAULT_SHORTCUTS[key];
-  if (!used.has(shortcutUsageKey(preferred))) {
+  if (preferred && !used.has(shortcutUsageKey(preferred))) {
     return preferred;
   }
-
-  for (const shortcutKey of SHORTCUT_KEYS) {
-    const candidate = DEFAULT_SHORTCUTS[shortcutKey];
-    if (!used.has(shortcutUsageKey(candidate))) {
-      return candidate;
-    }
-  }
-
   return null;
+}
+
+function shortcutBelongsToOtherDefault(key: PowerlineShortcutKey, shortcut: string): boolean {
+  const usageKey = shortcutUsageKey(shortcut);
+  return SHORTCUT_KEYS.some((shortcutKey) => {
+    const defaultShortcut = DEFAULT_SHORTCUTS[shortcutKey];
+    return shortcutKey !== key && defaultShortcut !== null && shortcutUsageKey(defaultShortcut) === usageKey;
+  });
 }
 
 function resolveShortcutConfig(settings: Record<string, unknown>): PowerlineShortcuts {
@@ -476,8 +485,12 @@ function resolveShortcutConfig(settings: Record<string, unknown>): PowerlineShor
 
   if (isRecord(shortcutSettings)) {
     for (const key of SHORTCUT_KEYS) {
-      const override = parseShortcutOverride(shortcutSettings[key]);
-      if (override) {
+      if (!Object.prototype.hasOwnProperty.call(shortcutSettings, key)) {
+        continue;
+      }
+
+      const override = parseShortcutSetting(shortcutSettings[key]);
+      if (override !== undefined) {
         resolved[key] = override;
       }
     }
@@ -487,9 +500,13 @@ function resolveShortcutConfig(settings: Record<string, unknown>): PowerlineShor
 
   for (const key of SHORTCUT_KEYS) {
     const configured = resolved[key];
+    if (configured === null) {
+      continue;
+    }
+
     const configuredUsageKey = shortcutUsageKey(configured);
 
-    if (!used.has(configuredUsageKey)) {
+    if (!used.has(configuredUsageKey) && !shortcutBelongsToOtherDefault(key, configured)) {
       used.add(configuredUsageKey);
       continue;
     }
@@ -497,6 +514,7 @@ function resolveShortcutConfig(settings: Record<string, unknown>): PowerlineShor
     const replacement = findShortcutReplacement(key, used);
     if (!replacement) {
       console.debug(`[beautypi] Shortcut conflict for ${key}: "${configured}" is already in use`);
+      resolved[key] = null;
       continue;
     }
 
@@ -1036,34 +1054,41 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerShortcut(resolvedShortcuts.copyEditor, {
-    description: "Copy full editor text",
-    handler: async (ctx) => {
-      if (!enabled || !ctx.hasUI) return;
+  if (resolvedShortcuts.copyEditor) {
+    pi.registerShortcut(resolvedShortcuts.copyEditor, {
+      description: "Copy full editor text",
+      handler: async (ctx) => {
+        if (!enabled || !ctx.hasUI) return;
 
-      const text = getEditorTextForClipboard(ctx);
-      if (!text) return;
+        const text = getEditorTextForClipboard(ctx);
+        if (!text) return;
 
-      copyTextToClipboard(ctx, text, "Copied editor text");
-    },
-  });
+        copyTextToClipboard(ctx, text, "Copied editor text");
+      },
+    });
+  }
 
-  pi.registerShortcut(resolvedShortcuts.cutEditor, {
-    description: "Cut full editor text",
-    handler: async (ctx) => {
-      if (!enabled || !ctx.hasUI) return;
+  if (resolvedShortcuts.cutEditor) {
+    pi.registerShortcut(resolvedShortcuts.cutEditor, {
+      description: "Cut full editor text",
+      handler: async (ctx) => {
+        if (!enabled || !ctx.hasUI) return;
 
-      const text = getEditorTextForClipboard(ctx);
-      if (!text) return;
+        const text = getEditorTextForClipboard(ctx);
+        if (!text) return;
 
-      copyTextToClipboard(ctx, text);
-      ctx.ui.setEditorText("");
-      ctx.ui.notify("Cut editor text", "info");
-    },
-  });
+        copyTextToClipboard(ctx, text);
+        ctx.ui.setEditorText("");
+        ctx.ui.notify("Cut editor text", "info");
+      },
+    });
+  }
 
   for (const { shortcutKey, description, action } of CHAT_JUMP_SHORTCUTS) {
-    pi.registerShortcut(resolvedShortcuts[shortcutKey], {
+    const shortcut = resolvedShortcuts[shortcutKey];
+    if (!shortcut) continue;
+
+    pi.registerShortcut(shortcut, {
       description,
       handler: async (ctx) => {
         if (!enabled || !ctx.hasUI) return;
@@ -1675,6 +1700,13 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     let autocompleteReady = false;
 
     const editorFactory = (tui: any, editorTheme: any, keybindings: any) => {
+      installStartupResourceGating(tui, {
+        isToolOutputExpanded: typeof ctx.ui?.getToolsExpanded === "function"
+          ? () => ctx.ui.getToolsExpanded() === true
+          : undefined,
+        theme: editorTheme,
+      });
+
       const editor = new PowerlineEditor(tui, editorTheme, keybindings, {
         keybindings,
         editorBoundaryShortcuts: {
@@ -1730,9 +1762,15 @@ export default function powerlineFooter(pi: ExtensionAPI) {
 
     ctx.ui.setEditorComponent(editorFactory);
 
-    ctx.ui.setFooter((tui: any, _theme: Theme, footerData: ReadonlyFooterDataProvider) => {
+    ctx.ui.setFooter((tui: any, footerTheme: Theme, footerData: ReadonlyFooterDataProvider) => {
       footerDataRef = footerData;
       tuiRef = tui;
+      installStartupResourceGating(tui, {
+        isToolOutputExpanded: typeof ctx.ui?.getToolsExpanded === "function"
+          ? () => ctx.ui.getToolsExpanded() === true
+          : undefined,
+        theme: footerTheme,
+      });
       installFooterStatusRepaintHook(footerData);
 
       process.stdout.write("\x1b[?1004h");
