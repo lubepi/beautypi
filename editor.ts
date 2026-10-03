@@ -186,8 +186,13 @@ export class PowerlineEditor extends CustomEditor {
    * carries the last input line, matching the regular-mode cluster.
    */
   render(width: number): string[] {
-    const rows = super.render(width);
     const renderBar = this.optionsRef.renderFrameBar;
+    // Fullscreen frame: render the inner editor six columns narrower so Pi
+    // wraps its text at the frame's inner width (three border columns on each
+    // side). With Pi's native width the text outgrows the frame's text area
+    // and the frame had to cut the overflow with an ellipsis instead of
+    // wrapping — the regular cluster wraps at the same width.
+    const rows = renderBar ? super.render(Math.max(10, width - 6)) : super.render(width);
     if (!renderBar) return rows;
 
     try {
