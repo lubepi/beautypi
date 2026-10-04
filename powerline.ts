@@ -1494,9 +1494,11 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   /**
    * Pi's fullscreen renderer parks the (hidden) hardware cursor on the marker
    * cell of the focused component and ends every frame with
-   * `\x1b[<row>;<col>H\x1b[?25h|l`. Record that row on the renderer so the
+   * `\x1b[<row>;<col>H\x1b[?25h|l`. Record that cell on the renderer so the
    * editor can translate mouse selections (screen coordinates) into
-   * input-line coordinates — e.g. to delete a marked range like an editor.
+   * input-line coordinates — e.g. to delete a marked range like an editor —
+   * and feed the editor's keyboard selection (Shift+Arrows) with the current
+   * cursor cell.
    */
   function installFullscreenCursorTracking(tui: any): void {
     if (!isFullscreenTui(tui)) return;
@@ -1511,10 +1513,16 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       originalWrite(data);
       if (typeof data !== "string" || !data.includes("\x1b[?25")) return;
       try {
-        const parks = [...data.matchAll(/\x1b\[(\d+);\d+H\x1b\[\?25[hl]/g)];
+        const parks = [...data.matchAll(/\x1b\[(\d+);(\d+)H\x1b\[\?25[hl]/g)];
         const last = parks[parks.length - 1];
         if (last) {
-          Reflect.set(tui, "beautypiCursorScreenRow", Number(last[1]) - 1);
+          const row = Number(last[1]) - 1;
+          const col = Number(last[2]) - 1;
+          Reflect.set(tui, "beautypiCursorScreenRow", row);
+          Reflect.set(tui, "beautypiCursorScreenCol", col);
+          if (currentEditor && typeof currentEditor.handleFullscreenCursorPark === "function") {
+            currentEditor.handleFullscreenCursorPark(row, col);
+          }
         }
       } catch {
         // Cursor tracking is best effort and must never break a frame write.

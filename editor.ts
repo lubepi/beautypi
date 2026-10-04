@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { CURSOR_MARKER, isKeyRelease, truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, isKeyRelease, matchesKey, truncateToWidth, visibleWidth, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import type { KeybindingsManager } from "@earendil-works/pi-coding-agent/dist/core/keybindings.js";
 import { readPrimarySelection } from "./clipboard.ts";
 import { matchesConfiguredShortcut } from "./shortcuts.ts";
@@ -114,6 +114,11 @@ export class PowerlineEditor extends CustomEditor {
   private readonly optionsRef: PowerlineEditorOptions;
   /** Text selection captured on middle press, before Pi clears it. */
   private pendingMiddleSelection: string | null = null;
+  /** Keyboard selection (fullscreen, Shift+Arrows): anchor park cell. */
+  private keyboardSelecting = false;
+  private keyboardAnchor: { row: number; col: number } | null = null;
+  /** Last cursor park seen while the keyboard selection is active. */
+  private keyboardLastPark: { row: number; col: number } | null = null;
   /** Reference to the compositor for selection queries. */
   compositorRef: {
     getEditorSelectionRange: () => { startLine: number; startCol: number; endLine: number; endCol: number } | null;
@@ -140,13 +145,20 @@ export class PowerlineEditor extends CustomEditor {
         return;
       }
     } else {
+      if (this.optionsRef.renderFrameBar && this.handleKeyboardSelectionKey(data)) {
+        return;
+      }
+
       // Backspace (\x7f, \b) or Delete (\x1b[3~): delete selection if active
       if (
         data === "\x7f"
         || data === "\x08"
         || data === "\x1b[3~"
       ) {
-        if (this.deleteSelectionIfAny() || this.deleteFullscreenSelectionIfAny()) return;
+        if (this.deleteSelectionIfAny() || this.deleteFullscreenSelectionIfAny()) {
+          this.resetKeyboardSelectionState();
+          return;
+        }
         super.handleInput(data);
         return;
       }
@@ -169,6 +181,7 @@ export class PowerlineEditor extends CustomEditor {
 
       // Any printable character: delete selection first, then insert
       if (this.deleteSelectionIfAny() || this.deleteFullscreenSelectionIfAny()) {
+        this.resetKeyboardSelectionState();
         // After deletion, re-insert the character via super
         super.handleInput(data);
         return;
@@ -254,6 +267,12 @@ export class PowerlineEditor extends CustomEditor {
    * middle click never reaches us.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.type === "press") {
+      // A mouse press replaces or cancels a keyboard selection (Pi re-anchors
+      // its own selection from the press point).
+      this.resetKeyboardSelectionState();
+    }
+
     if (this.optionsRef.renderFrameBar) {
       event = this.mapFrameMouse(event);
     }
@@ -297,6 +316,163 @@ export class PowerlineEditor extends CustomEditor {
       return typeof text === "string" && text.length > 0 ? text : undefined;
     } catch {
       return undefined;
+    }
+  }
+
+  /** Shift+Arrow keys: the plain movement sequence to delegate. */
+  private keyboardSelectionMovement(data: string): string | null {
+    if (matchesKey(data, "shift+left")) return "\x1b[D";
+    if (matchesKey(data, "shift+right")) return "\x1b[C";
+    if (matchesKey(data, "shift+up")) return "\x1b[A";
+    if (matchesKey(data, "shift+down")) return "\x1b[B";
+    return null;
+  }
+
+  /** True for the editor's own unshifted navigation keys. */
+  private isPlainMovementKey(data: string): boolean {
+    const keybindings = this.keybindingsRef;
+    return keybindings.matches(data, "tui.editor.cursorLeft")
+      || keybindings.matches(data, "tui.editor.cursorRight")
+      || keybindings.matches(data, "tui.editor.cursorUp")
+      || keybindings.matches(data, "tui.editor.cursorDown")
+      || keybindings.matches(data, "tui.editor.cursorWordLeft")
+      || keybindings.matches(data, "tui.editor.cursorWordRight")
+      || keybindings.matches(data, "tui.editor.cursorLineStart")
+      || keybindings.matches(data, "tui.editor.cursorLineEnd");
+  }
+
+  /**
+   * Keyboard selection for the fullscreen frame (Shift+Arrows, Ctrl+X cut).
+   * Pi's renderer owns the on-screen selection in screen coordinates — the
+   * same space as mouse selections — so the anchor is the parked cursor cell
+   * of the last frame and every cursor move updates the focus through
+   * {@link handleFullscreenCursorPark}. Highlight, copy (Ctrl+Shift+C), cut,
+   * Backspace/Delete and replace-on-typing then reuse the existing fullscreen
+   * selection paths unchanged. Returns true when the key was consumed.
+   */
+  private handleKeyboardSelectionKey(data: string): boolean {
+    const movement = this.keyboardSelectionMovement(data);
+    if (movement) {
+      // Key releases must not move the cursor a second time.
+      if (!isKeyRelease(data)) this.extendKeyboardSelection(movement);
+      return true;
+    }
+
+    if (isKeyRelease(data)) return false;
+
+    if (this.keyboardSelecting && this.isPlainMovementKey(data)) {
+      // Plain navigation collapses the keyboard selection, like any editor.
+      this.clearKeyboardSelection();
+      return false;
+    }
+
+    if (matchesKey(data, "ctrl+x")) {
+      const tui = Reflect.get(this, "tui");
+      const hasSelection = typeof tui?.hasActiveSelection === "function"
+        && tui.hasActiveSelection() === true;
+      if (hasSelection) {
+        this.cutFullscreenSelection();
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /** Start (or continue) a keyboard selection and move the editor cursor. */
+  private extendKeyboardSelection(plainMovement: string): void {
+    const tui = Reflect.get(this, "tui");
+    if (!this.keyboardSelecting) {
+      const row = tui ? Reflect.get(tui, "beautypiCursorScreenRow") : undefined;
+      const col = tui ? Reflect.get(tui, "beautypiCursorScreenCol") : undefined;
+      if (typeof row !== "number" || typeof col !== "number") {
+        // Without a parked cursor cell the selection cannot be anchored.
+        super.handleInput(plainMovement);
+        return;
+      }
+      this.keyboardSelecting = true;
+      this.keyboardAnchor = { row, col };
+      this.keyboardLastPark = { row, col };
+      // A previous (mouse) selection is replaced by the keyboard selection.
+      try {
+        Reflect.set(tui, "selectionAnchor", undefined);
+        Reflect.set(tui, "selectionFocus", undefined);
+      } catch {
+        // Replacing the previous selection is best effort.
+      }
+    }
+    super.handleInput(plainMovement);
+  }
+
+  /**
+   * Called by the fullscreen cursor tracking after every rendered frame with
+   * the parked cursor cell (0-based screen coordinates). While a keyboard
+   * selection is active the focus follows the cursor; the cell under the
+   * cursor stays unselected, matching the base editor where the cursor marks
+   * the gap at the selection edge.
+   */
+  handleFullscreenCursorPark(row: number, col: number): void {
+    if (!this.keyboardSelecting || !this.keyboardAnchor) return;
+    const last = this.keyboardLastPark;
+    if (last && last.row === row && last.col === col) return;
+    this.keyboardLastPark = { row, col };
+
+    const tui = Reflect.get(this, "tui");
+    if (!tui) return;
+
+    const anchor = this.keyboardAnchor;
+    if (anchor.row === row && anchor.col === col) {
+      // The cursor is back on the anchor cell: nothing is selected.
+      Reflect.set(tui, "selectionAnchor", undefined);
+      Reflect.set(tui, "selectionFocus", undefined);
+      if (typeof tui.requestRender === "function") tui.requestRender();
+      return;
+    }
+
+    const anchorFirst = anchor.row < row || (anchor.row === row && anchor.col < col);
+    const lower = anchorFirst ? anchor : { row, col };
+    const upper = anchorFirst ? { row, col } : anchor;
+    // Pull the upper end back by one cell: the cursor cell itself is not part
+    // of the selection. (Only when the cursor wrapped to column 0 does the
+    // pull-back fall on the previous row; keep the cell in that rare case.)
+    const focus = upper.col > 0 ? { row: upper.row, col: upper.col - 1 } : upper;
+    Reflect.set(tui, "selectionAnchor", { row: lower.row, col: lower.col, boundary: false });
+    Reflect.set(tui, "selectionFocus", { row: focus.row, col: focus.col, boundary: false });
+    if (typeof tui.requestRender === "function") tui.requestRender();
+  }
+
+  /** Collapse the keyboard selection (keeps the editor cursor where it is). */
+  private clearKeyboardSelection(): void {
+    if (!this.keyboardSelecting) return;
+    this.resetKeyboardSelectionState();
+    const tui = Reflect.get(this, "tui");
+    if (!tui) return;
+    try {
+      Reflect.set(tui, "selectionAnchor", undefined);
+      Reflect.set(tui, "selectionFocus", undefined);
+      if (typeof tui.requestRender === "function") tui.requestRender();
+    } catch {
+      // Clearing the renderer selection is best effort.
+    }
+  }
+
+  /** Forget the keyboard-selection bookkeeping without touching the renderer. */
+  private resetKeyboardSelectionState(): void {
+    this.keyboardSelecting = false;
+    this.keyboardAnchor = null;
+    this.keyboardLastPark = null;
+  }
+
+  /** Ctrl+X: copy the active selection to the system clipboard, then remove it. */
+  private cutFullscreenSelection(): void {
+    const tui = Reflect.get(this, "tui");
+    try {
+      void tui?.copyActiveSelectionToClipboard?.();
+    } catch {
+      // Clipboard copy is best effort; the range is removed regardless.
+    }
+    if (this.deleteFullscreenSelectionIfAny()) {
+      this.resetKeyboardSelectionState();
     }
   }
 
