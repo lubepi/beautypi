@@ -5,7 +5,7 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { isKeyRelease, matchesKey, truncateToWidth, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, isKeyRelease, matchesKey, truncateToWidth, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -1559,6 +1559,44 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     }
   }
 
+  /**
+   * Pi's selection slicing duplicates the zero-width cursor marker
+   * (CURSOR_MARKER, an APC string) inside the rendered row when the cursor
+   * sits inside the selected range: extractCursorPosition() consumes only
+   * the first copy for the hardware cursor position, the stray second copy
+   * is written to the terminal. Terminals terminate APC with ST/ESC, not
+   * BEL, so the stray marker swallows the following text up to the next
+   * escape sequence — the text after the selection disappears in the blink
+   * phase where no escape code follows the marker immediately. Strip every
+   * remaining marker once Pi has computed its cursor position; nothing else
+   * consumes them.
+   */
+  function installFullscreenMarkerCleanup(tui: any): void {
+    if (!isFullscreenTui(tui)) return;
+
+    try {
+      if (Reflect.get(tui, "beautypiMarkerCleanupPatched") === true) return;
+      const original = Reflect.get(tui, "extractCursorPosition");
+      if (typeof original !== "function") return;
+      Reflect.set(tui, "beautypiMarkerCleanupPatched", true);
+
+      tui.extractCursorPosition = (lines: string[], height: number) => {
+        const position = original.call(tui, lines, height);
+        if (position) {
+          for (let index = 0; index < lines.length; index += 1) {
+            const line = lines[index];
+            if (typeof line === "string" && line.includes(CURSOR_MARKER)) {
+              lines[index] = line.split(CURSOR_MARKER).join("");
+            }
+          }
+        }
+        return position;
+      };
+    } catch {
+      // Keep Pi's default rendering when the renderer internals differ.
+    }
+  }
+
   function findContainerWithChild(tui: any, child: any): { container: any; index: number } | null {
     const children = Array.isArray(tui?.children) ? tui.children : [];
     const index = children.findIndex((candidate: any) => Array.isArray(candidate?.children) && candidate.children.includes(child));
@@ -1962,6 +2000,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       installFullscreenClipboardSemantics(tui);
       installFullscreenCursorTracking(tui);
       installFullscreenSelectionClamp(tui);
+      installFullscreenMarkerCleanup(tui);
 
       process.stdout.write("\x1b[?1004h");
 
