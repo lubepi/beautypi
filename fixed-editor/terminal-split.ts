@@ -771,6 +771,16 @@ export class TerminalSplitCompositor {
     return text;
   }
 
+  /** The visual position of the editor selection's fixed anchor, if any. */
+  getEditorSelectionAnchor(): { visLine: number; col: number } | null {
+    if (!this.selectionAnchor || !this.selectionFocus || this.selectionArea !== "cluster") return null;
+    const cr = this.lastClusterRender;
+    if (!cr || cr.editorTextStart === undefined || cr.editorTextEnd === undefined) return null;
+    const line = this.selectionAnchor.line;
+    if (line < cr.editorTextStart || line >= cr.editorTextEnd) return null;
+    return { visLine: line - cr.editorTextStart, col: Math.max(0, this.selectionAnchor.col - 3) };
+  }
+
   private handleMousePacket(packet: SgrMousePacket): void {
     const delta = mouseScrollDelta(packet);
     if (delta !== 0) {

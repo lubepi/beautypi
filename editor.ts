@@ -138,12 +138,19 @@ export class PowerlineEditor extends CustomEditor {
   private keyboardAnchorLogical: { line: number; col: number } | null = null;
   /** Last cursor park seen while the keyboard selection is active. */
   private keyboardLastPark: { row: number; col: number } | null = null;
+  /**
+   * Upper-edge offset while extending a mouse selection in fullscreen: the
+   * mouse focus cell is part of the selection while a keyboard cursor marks
+   * the gap after it, so the moving edge sits one cell further right.
+   */
+  private keyboardUpperOffset = 0;
   /** Reference to the compositor for selection queries. */
   compositorRef: {
     getEditorSelectionRange: () => { startLine: number; startCol: number; endLine: number; endCol: number } | null;
     clearEditorSelection: () => void;
     setEditorTextSelection?: (anchorVisLine: number, anchorCol: number, focusVisLine: number, focusCol: number) => void;
     copyEditorSelection?: () => string;
+    getEditorSelectionAnchor?: () => { visLine: number; col: number } | null;
   } | null = null;
 
   constructor(tui: any, theme: any, keybindings: KeybindingsManager, options: PowerlineEditorOptions) {
@@ -347,6 +354,26 @@ export class PowerlineEditor extends CustomEditor {
     }
   }
 
+  /**
+   * The fixed anchor cell of an active renderer selection (0-based screen
+   * coordinates) when it covers the editor text, or null. Used to extend a
+   * mouse selection with Shift+Arrows instead of replacing it.
+   */
+  private readRendererSelectionAnchor(tui: any): { row: number; col: number } | null {
+    try {
+      const anchor = Reflect.get(tui, "selectionAnchor");
+      const focus = Reflect.get(tui, "selectionFocus");
+      if (!anchor || typeof anchor !== "object" || anchor.scrollView) return null;
+      if (!focus || typeof focus !== "object" || focus.scrollView) return null;
+      const row = Number(anchor.row);
+      const col = Number(anchor.col);
+      if (!Number.isFinite(row) || !Number.isFinite(col)) return null;
+      return { row, col };
+    } catch {
+      return null;
+    }
+  }
+
   /** Shift+Arrow keys: the plain movement sequence to delegate. */
   private keyboardSelectionMovement(data: string): string | null {
     if (matchesKey(data, "shift+left")) return "\x1b[D";
@@ -422,16 +449,15 @@ export class PowerlineEditor extends CustomEditor {
         super.handleInput(plainMovement);
         return;
       }
+      // An existing mouse selection is extended instead of replaced: its
+      // anchor stays the fixed edge and the cursor keeps following the
+      // moving edge. The mouse focus cell is part of the selection while
+      // the keyboard cursor marks the gap after it (upper offset 1).
+      const existingAnchor = this.readRendererSelectionAnchor(tui);
       this.keyboardSelecting = true;
-      this.keyboardAnchor = { row, col };
+      this.keyboardAnchor = existingAnchor ?? { row, col };
+      this.keyboardUpperOffset = existingAnchor ? 1 : 0;
       this.keyboardLastPark = { row, col };
-      // A previous (mouse) selection is replaced by the keyboard selection.
-      try {
-        Reflect.set(tui, "selectionAnchor", undefined);
-        Reflect.set(tui, "selectionFocus", undefined);
-      } catch {
-        // Replacing the previous selection is best effort.
-      }
     }
     super.handleInput(plainMovement);
   }
@@ -453,7 +479,8 @@ export class PowerlineEditor extends CustomEditor {
     if (!tui) return;
 
     const anchor = this.keyboardAnchor;
-    if (anchor.row === row && anchor.col === col) {
+    const cursorPoint = this.keyboardUpperOffset === 1 ? { row, col: col + 1 } : { row, col };
+    if (anchor.row === cursorPoint.row && anchor.col === cursorPoint.col) {
       // The cursor is back on the anchor cell: nothing is selected.
       Reflect.set(tui, "selectionAnchor", undefined);
       Reflect.set(tui, "selectionFocus", undefined);
@@ -461,9 +488,9 @@ export class PowerlineEditor extends CustomEditor {
       return;
     }
 
-    const anchorFirst = anchor.row < row || (anchor.row === row && anchor.col < col);
-    const lower = anchorFirst ? anchor : { row, col };
-    const upper = anchorFirst ? { row, col } : anchor;
+    const anchorFirst = anchor.row < cursorPoint.row || (anchor.row === cursorPoint.row && anchor.col < cursorPoint.col);
+    const lower = anchorFirst ? anchor : cursorPoint;
+    const upper = anchorFirst ? cursorPoint : anchor;
     if (lower.row === upper.row && upper.col - 1 === lower.col) {
       // Exactly one cell: the renderer treats equal anchor/focus as no
       // selection, so mark the cell with an exclusive boundary end instead.
@@ -534,6 +561,7 @@ export class PowerlineEditor extends CustomEditor {
     this.keyboardAnchor = null;
     this.keyboardAnchorLogical = null;
     this.keyboardLastPark = null;
+    this.keyboardUpperOffset = 0;
   }
 
   /**
@@ -558,13 +586,46 @@ export class PowerlineEditor extends CustomEditor {
       }
       const line = Number(Reflect.get(state, "cursorLine") ?? 0);
       const col = Number(Reflect.get(state, "cursorCol") ?? 0);
+      // An existing mouse selection is extended instead of replaced: keep
+      // its anchor as the fixed edge.
+      const existing = typeof this.compositorRef.getEditorSelectionAnchor === "function"
+        ? this.compositorRef.getEditorSelectionAnchor()
+        : null;
+      const anchor = existing
+        ? this.logicalPositionFromVisual(existing.visLine, existing.col)
+        : null;
       this.keyboardSelecting = true;
-      this.keyboardAnchorLogical = { line, col };
-      // A previous (mouse) selection is replaced by the keyboard selection.
-      this.compositorRef.clearEditorSelection?.();
+      this.keyboardAnchorLogical = anchor ?? { line, col };
     }
     super.handleInput(plainMovement);
     this.syncRegularKeyboardSelection();
+  }
+
+  /** Map a visual (wrapped row, text column) back to logical editor coordinates. */
+  private logicalPositionFromVisual(visLine: number, withinCol: number): { line: number; col: number } | null {
+    const state = Reflect.get(this, "state");
+    if (!state || typeof state !== "object") return null;
+    const lines: unknown = Reflect.get(state, "lines");
+    if (!Array.isArray(lines)) return null;
+    const width = this.tui?.terminal?.columns ?? 80;
+    const wrapWidth = Math.max(1, width - 6);
+    const visualLines: { editorLine: number; startCol: number }[] = [];
+    for (let li = 0; li < lines.length; li++) {
+      const line = (lines[li] as string) ?? "";
+      if (line.length === 0) {
+        visualLines.push({ editorLine: li, startCol: 0 });
+      } else {
+        for (let ci = 0; ci < line.length; ci += wrapWidth) {
+          visualLines.push({ editorLine: li, startCol: ci });
+        }
+      }
+    }
+    if (visualLines.length === 0 || visLine < 0 || visLine >= visualLines.length) return null;
+    const target = visualLines[visLine];
+    const lineLen = ((lines[target.editorLine] as string) ?? "").length;
+    const segEnd = Math.min(target.startCol + wrapWidth, lineLen);
+    const clamped = Math.min(Math.max(0, withinCol), segEnd - target.startCol);
+    return { line: target.editorLine, col: target.startCol + clamped };
   }
 
   /**
