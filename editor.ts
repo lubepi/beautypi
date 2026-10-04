@@ -160,6 +160,15 @@ export class PowerlineEditor extends CustomEditor {
   }
 
   handleInput(data: string): void {
+    if (!isKeyRelease(data) && matchesKey(data, "alt+enter")) {
+      // Terminals without the kitty keyboard protocol (e.g. gnome-terminal /
+      // VTE) cannot distinguish Shift+Enter from plain Enter — it arrives as a
+      // bare \r and submits. Alt+Enter is distinguishable there (arrives as
+      // ESC CR) and is unused by pi, so route it to pi's newLine binding.
+      super.handleInput("\n");
+      return;
+    }
+
     const droppedPathText = droppedPathTextFromInput(data);
     if (droppedPathText !== null) {
       this.insertTextAtCursor(droppedPathText);
