@@ -25,6 +25,7 @@ interface TerminalSplitCompositorOptions {
   onCopySelection?: (text: string) => void;
   onKeyboardCopy?: (text: string) => void;
   onEditorTextClick?: (termCol: number, visLineIndex: number) => void;
+  onSelectionStart?: () => void;
 }
 
 interface PatchedRenderable {
@@ -372,6 +373,7 @@ export class TerminalSplitCompositor {
   private readonly onCopySelection: ((text: string) => void) | null;
   private readonly onKeyboardCopy: ((text: string) => void) | null;
   private readonly onEditorTextClick: ((termCol: number, termRow: number) => void) | null;
+  private readonly onSelectionStart: (() => void) | null;
   private lastClusterRender: FixedEditorClusterRender | null = null;
   private extendedKeyboardMode: ExtendedKeyboardMode | null = null;
   private readonly rowsDescriptor: PropertyDescriptor | undefined;
@@ -417,6 +419,7 @@ export class TerminalSplitCompositor {
     this.onCopySelection = options.onCopySelection ?? null;
     this.onKeyboardCopy = options.onKeyboardCopy ?? null;
     this.onEditorTextClick = options.onEditorTextClick ?? null;
+    this.onSelectionStart = options.onSelectionStart ?? null;
     this.rowsDescriptor = descriptorForRows(options.terminal);
     this.originalWrite = options.terminal.write.bind(options.terminal);
     this.originalDoRender = typeof options.tui.doRender === "function" ? options.tui.doRender.bind(options.tui) : null;
@@ -741,6 +744,33 @@ export class TerminalSplitCompositor {
     this.requestRender();
   }
 
+  /**
+   * Highlight a keyboard selection in the editor text. Coordinates are visual:
+   * line indices into the editor's wrapped rows and 0-based columns within the
+   * text (the border prefix and cluster offset are added here). The focus end
+   * is exclusive, matching the mouse-selection conventions.
+   */
+  setEditorTextSelection(anchorVisLine: number, anchorCol: number, focusVisLine: number, focusCol: number): void {
+    const cr = this.lastClusterRender;
+    if (!cr || cr.editorTextStart === undefined || cr.editorTextEnd === undefined) return;
+    const maxVis = Math.max(0, cr.editorTextEnd - 1 - cr.editorTextStart);
+    const lineFor = (vis: number): number => cr.editorTextStart! + Math.max(0, Math.min(vis, maxVis));
+    this.selectionArea = "cluster";
+    this.selectionAnchor = { line: lineFor(anchorVisLine), col: 3 + Math.max(0, anchorCol) };
+    this.selectionFocus = { line: lineFor(focusVisLine), col: 3 + Math.max(0, focusCol) };
+    this.selectionDragging = false;
+    this.preserveSelectionFocusOnRelease = false;
+    this.lastLeftPress = null;
+    this.requestRender();
+  }
+
+  /** Copy the current editor selection through the keyboard-copy path. */
+  copyEditorSelection(): string {
+    const text = this.getSelectedText();
+    if (text) this.onKeyboardCopy?.(text);
+    return text;
+  }
+
   private handleMousePacket(packet: SgrMousePacket): void {
     const delta = mouseScrollDelta(packet);
     if (delta !== 0) {
@@ -832,6 +862,7 @@ export class TerminalSplitCompositor {
   }
 
   private startSelection(location: SelectionLocation): void {
+    this.onSelectionStart?.();
     const now = Date.now();
     const line = location.point.line;
     if (

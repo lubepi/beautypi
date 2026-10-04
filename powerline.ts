@@ -1653,6 +1653,9 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       onKeyboardCopy: (text) => {
         copyToClipboard(text);
       },
+      onSelectionStart: () => {
+        currentEditor?.handleExternalSelectionStart?.();
+      },
       onEditorTextClick: (col, visLineIndex) => {
         currentEditor?.setCursorFromTerminalPosition(col, visLineIndex);
         blinkOn = true;

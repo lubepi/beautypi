@@ -117,12 +117,16 @@ export class PowerlineEditor extends CustomEditor {
   /** Keyboard selection (fullscreen, Shift+Arrows): anchor park cell. */
   private keyboardSelecting = false;
   private keyboardAnchor: { row: number; col: number } | null = null;
+  /** Keyboard selection (regular mode): anchor in editor line/col. */
+  private keyboardAnchorLogical: { line: number; col: number } | null = null;
   /** Last cursor park seen while the keyboard selection is active. */
   private keyboardLastPark: { row: number; col: number } | null = null;
   /** Reference to the compositor for selection queries. */
   compositorRef: {
     getEditorSelectionRange: () => { startLine: number; startCol: number; endLine: number; endCol: number } | null;
     clearEditorSelection: () => void;
+    setEditorTextSelection?: (anchorVisLine: number, anchorCol: number, focusVisLine: number, focusCol: number) => void;
+    copyEditorSelection?: () => string;
   } | null = null;
 
   constructor(tui: any, theme: any, keybindings: KeybindingsManager, options: PowerlineEditorOptions) {
@@ -145,7 +149,7 @@ export class PowerlineEditor extends CustomEditor {
         return;
       }
     } else {
-      if (this.optionsRef.renderFrameBar && this.handleKeyboardSelectionKey(data)) {
+      if ((this.optionsRef.renderFrameBar || this.compositorRef) && this.handleKeyboardSelectionKey(data)) {
         return;
       }
 
@@ -155,7 +159,7 @@ export class PowerlineEditor extends CustomEditor {
         || data === "\x08"
         || data === "\x1b[3~"
       ) {
-        if (this.deleteSelectionIfAny() || this.deleteFullscreenSelectionIfAny()) {
+        if (this.deleteKeyboardSelectionIfAny() || this.deleteSelectionIfAny() || this.deleteFullscreenSelectionIfAny()) {
           this.resetKeyboardSelectionState();
           return;
         }
@@ -180,7 +184,7 @@ export class PowerlineEditor extends CustomEditor {
       }
 
       // Any printable character: delete selection first, then insert
-      if (this.deleteSelectionIfAny() || this.deleteFullscreenSelectionIfAny()) {
+      if (this.deleteKeyboardSelectionIfAny() || this.deleteSelectionIfAny() || this.deleteFullscreenSelectionIfAny()) {
         this.resetKeyboardSelectionState();
         // After deletion, re-insert the character via super
         super.handleInput(data);
@@ -367,11 +371,16 @@ export class PowerlineEditor extends CustomEditor {
     }
 
     if (matchesKey(data, "ctrl+x")) {
-      const tui = Reflect.get(this, "tui");
-      const hasSelection = typeof tui?.hasActiveSelection === "function"
-        && tui.hasActiveSelection() === true;
-      if (hasSelection) {
-        this.cutFullscreenSelection();
+      if (this.optionsRef.renderFrameBar) {
+        const tui = Reflect.get(this, "tui");
+        const hasSelection = typeof tui?.hasActiveSelection === "function"
+          && tui.hasActiveSelection() === true;
+        if (hasSelection) {
+          this.cutFullscreenSelection();
+          return true;
+        }
+      } else if (this.keyboardSelecting) {
+        this.cutRegularKeyboardSelection();
         return true;
       }
     }
@@ -381,6 +390,11 @@ export class PowerlineEditor extends CustomEditor {
 
   /** Start (or continue) a keyboard selection and move the editor cursor. */
   private extendKeyboardSelection(plainMovement: string): void {
+    if (!this.optionsRef.renderFrameBar) {
+      this.extendRegularKeyboardSelection(plainMovement);
+      return;
+    }
+
     const tui = Reflect.get(this, "tui");
     if (!this.keyboardSelecting) {
       const row = tui ? Reflect.get(tui, "beautypiCursorScreenRow") : undefined;
@@ -432,6 +446,14 @@ export class PowerlineEditor extends CustomEditor {
     const anchorFirst = anchor.row < row || (anchor.row === row && anchor.col < col);
     const lower = anchorFirst ? anchor : { row, col };
     const upper = anchorFirst ? { row, col } : anchor;
+    if (lower.row === upper.row && upper.col - 1 === lower.col) {
+      // Exactly one cell: the renderer treats equal anchor/focus as no
+      // selection, so mark the cell with an exclusive boundary end instead.
+      Reflect.set(tui, "selectionAnchor", { row: lower.row, col: lower.col, boundary: false });
+      Reflect.set(tui, "selectionFocus", { row: lower.row, col: lower.col + 1, boundary: true });
+      if (typeof tui.requestRender === "function") tui.requestRender();
+      return;
+    }
     // Pull the upper end back by one cell: the cursor cell itself is not part
     // of the selection. (Only when the cursor wrapped to column 0 does the
     // pull-back fall on the previous row; keep the cell in that rare case.)
@@ -445,6 +467,8 @@ export class PowerlineEditor extends CustomEditor {
   private clearKeyboardSelection(): void {
     if (!this.keyboardSelecting) return;
     this.resetKeyboardSelectionState();
+    this.compositorRef?.clearEditorSelection?.();
+    if (!this.optionsRef.renderFrameBar) return;
     const tui = Reflect.get(this, "tui");
     if (!tui) return;
     try {
@@ -460,7 +484,132 @@ export class PowerlineEditor extends CustomEditor {
   private resetKeyboardSelectionState(): void {
     this.keyboardSelecting = false;
     this.keyboardAnchor = null;
+    this.keyboardAnchorLogical = null;
     this.keyboardLastPark = null;
+  }
+
+  /**
+   * A mouse selection started in the regular-mode compositor: drop stale
+   * keyboard-selection state so the next Shift+Arrow anchors at the cursor.
+   */
+  handleExternalSelectionStart(): void {
+    this.resetKeyboardSelectionState();
+  }
+
+  /**
+   * Regular mode: start (or continue) a keyboard selection. The anchor is the
+   * cursor's logical line/col, the range is reflected on the compositor
+   * overlay after every cursor move.
+   */
+  private extendRegularKeyboardSelection(plainMovement: string): void {
+    const state = Reflect.get(this, "state");
+    if (!this.keyboardSelecting) {
+      if (!state || !this.compositorRef) {
+        super.handleInput(plainMovement);
+        return;
+      }
+      const line = Number(Reflect.get(state, "cursorLine") ?? 0);
+      const col = Number(Reflect.get(state, "cursorCol") ?? 0);
+      this.keyboardSelecting = true;
+      this.keyboardAnchorLogical = { line, col };
+      // A previous (mouse) selection is replaced by the keyboard selection.
+      this.compositorRef.clearEditorSelection?.();
+    }
+    super.handleInput(plainMovement);
+    this.syncRegularKeyboardSelection();
+  }
+
+  /**
+   * Regular mode: reflect the keyboard selection on the compositor overlay.
+   * Endpoints are mapped through the editor's own wrap model (visual lines at
+   * width - 6 with a three-column border prefix) and the range end is
+   * exclusive, matching the compositor's selection conventions.
+   */
+  private syncRegularKeyboardSelection(): void {
+    const compositor = this.compositorRef;
+    const state = Reflect.get(this, "state");
+    const anchor = this.keyboardAnchorLogical;
+    if (!compositor?.setEditorTextSelection || !state || !this.keyboardSelecting || !anchor) return;
+
+    const lines: unknown = Reflect.get(state, "lines");
+    if (!Array.isArray(lines)) return;
+    const cursorLine = Number(Reflect.get(state, "cursorLine") ?? 0);
+    const cursorCol = Number(Reflect.get(state, "cursorCol") ?? 0);
+    if (anchor.line === cursorLine && anchor.col === cursorCol) {
+      compositor.clearEditorSelection?.();
+      return;
+    }
+
+    const anchorFirst = anchor.line < cursorLine || (anchor.line === cursorLine && anchor.col < cursorCol);
+    const lower = anchorFirst ? anchor : { line: cursorLine, col: cursorCol };
+    const upper = anchorFirst ? { line: cursorLine, col: cursorCol } : anchor;
+
+    const wrapWidth = Math.max(1, (this.tui?.terminal?.columns ?? 80) - 6);
+    const start = this.regularVisualPosition(lines as string[], lower.line, lower.col, wrapWidth);
+    const end = this.regularVisualPosition(lines as string[], upper.line, upper.col, wrapWidth);
+    compositor.setEditorTextSelection(start.visLine, start.col, end.visLine, end.col);
+  }
+
+  /**
+   * Map a logical (line, col) to its wrapped visual position — the same model
+   * {@link setCursorFromTerminalPosition} uses (inverse direction).
+   */
+  private regularVisualPosition(
+    lines: string[],
+    line: number,
+    col: number,
+    wrapWidth: number,
+  ): { visLine: number; col: number } {
+    const clampedLine = Math.max(0, Math.min(line, Math.max(0, lines.length - 1)));
+    let visLine = 0;
+    for (let i = 0; i < clampedLine; i++) {
+      const length = (lines[i] ?? "").length;
+      visLine += length === 0 ? 1 : Math.ceil(length / wrapWidth);
+    }
+    const length = (lines[clampedLine] ?? "").length;
+    const clampedCol = Math.max(0, Math.min(col, length));
+    const segments = length === 0 ? 1 : Math.ceil(length / wrapWidth);
+    const segment = Math.min(Math.floor(clampedCol / wrapWidth), segments - 1);
+    return { visLine: visLine + segment, col: clampedCol - segment * wrapWidth };
+  }
+
+  /** Delete a keyboard selection through the mode's own path. */
+  private deleteKeyboardSelectionIfAny(): boolean {
+    if (!this.keyboardSelecting) return false;
+    if (this.optionsRef.renderFrameBar) return this.deleteFullscreenSelectionIfAny();
+    return this.deleteRegularKeyboardSelection();
+  }
+
+  /**
+   * Regular mode: delete the selected range in logical text coordinates.
+   * [lower, upper) is exactly the selected character range — the upper end
+   * (the cursor cell) is already exclusive.
+   */
+  private deleteRegularKeyboardSelection(): boolean {
+    const anchor = this.keyboardAnchorLogical;
+    const state = Reflect.get(this, "state");
+    if (!anchor || !state || typeof state !== "object") return false;
+    const cursorLine = Number(Reflect.get(state, "cursorLine") ?? 0);
+    const cursorCol = Number(Reflect.get(state, "cursorCol") ?? 0);
+    if (anchor.line === cursorLine && anchor.col === cursorCol) return false;
+    const anchorFirst = anchor.line < cursorLine || (anchor.line === cursorLine && anchor.col < cursorCol);
+    const lower = anchorFirst ? anchor : { line: cursorLine, col: cursorCol };
+    const upper = anchorFirst ? { line: cursorLine, col: cursorCol } : anchor;
+    return this.deleteSelectionRange(lower.line, lower.col, upper.line, upper.col, () => {
+      this.compositorRef?.clearEditorSelection?.();
+    });
+  }
+
+  /** Regular mode Ctrl+X: copy through the compositor path, then remove the range. */
+  private cutRegularKeyboardSelection(): void {
+    try {
+      this.compositorRef?.copyEditorSelection?.();
+    } catch {
+      // Clipboard copy is best effort; the range is removed regardless.
+    }
+    if (this.deleteRegularKeyboardSelection()) {
+      this.resetKeyboardSelectionState();
+    }
   }
 
   /** Ctrl+X: copy the active selection to the system clipboard, then remove it. */
