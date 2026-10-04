@@ -1605,6 +1605,54 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     }
   }
 
+  /**
+   * Pi's fullscreen renderer puts the editor cursor on the press position of
+   * a mouse press and only synthesizes a click for releases without a drag,
+   * so after a drag the cursor stays where the drag started. When a drag over
+   * the editor text finishes, dispatch a synthetic click at the release point
+   * — the cursor lands where the button was released (which is not
+   * necessarily the end of the marked range). Releases outside the editor's
+   * text rows are ignored so other components never see the click.
+   */
+  function installFullscreenSelectionDrop(tui: any): void {
+    if (!isFullscreenTui(tui)) return;
+
+    try {
+      if (Reflect.get(tui, "beautypiSelectionDropPatched") === true) return;
+      const original = Reflect.get(tui, "handleSelectionMouseEvent");
+      if (typeof original !== "function") return;
+      Reflect.set(tui, "beautypiSelectionDropPatched", true);
+
+      tui.handleSelectionMouseEvent = (event: any) => {
+        const pressWasActive = tui.selectionPressActive === true;
+        const dragged = tui.selectionDragged === true;
+        const result = original.call(tui, event);
+        if (!event?.release || !pressWasActive || !dragged || (event.button & 3) !== 0) {
+          return result;
+        }
+        try {
+          if (!currentEditor || typeof currentEditor.isFullscreenTextRow !== "function") return result;
+          if (!currentEditor.isFullscreenTextRow(event.y)) return result;
+          const clickEvent = typeof tui.createMouseEvent === "function"
+            ? tui.createMouseEvent("click", event.button, event.x, event.y, { clickCount: 1 })
+            : undefined;
+          if (!clickEvent) return result;
+          const overlay = typeof tui.dispatchMouseToOverlay === "function" ? tui.dispatchMouseToOverlay(clickEvent) : {};
+          const dispatchResult = overlay?.result ?? (overlay?.hit ? undefined : tui.dispatchMouseToLayout?.(clickEvent));
+          if (dispatchResult) {
+            tui.applyMouseDispatchResult?.(clickEvent, dispatchResult);
+          }
+          if (typeof tui.requestRender === "function") tui.requestRender();
+        } catch {
+          // The cursor drop is best effort; the selection stays intact.
+        }
+        return result;
+      };
+    } catch {
+      // Keep Pi's default behavior when the renderer internals differ.
+    }
+  }
+
   function findContainerWithChild(tui: any, child: any): { container: any; index: number } | null {
     const children = Array.isArray(tui?.children) ? tui.children : [];
     const index = children.findIndex((candidate: any) => Array.isArray(candidate?.children) && candidate.children.includes(child));
@@ -2012,6 +2060,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       installFullscreenCursorTracking(tui);
       installFullscreenSelectionClamp(tui);
       installFullscreenMarkerCleanup(tui);
+      installFullscreenSelectionDrop(tui);
 
       process.stdout.write("\x1b[?1004h");
 

@@ -62,6 +62,23 @@ function isCommandUndoShortcut(data: string): boolean {
     || data === "\x1b[27;9;122~";
 }
 
+/**
+ * True when the input actually inserts text: plain characters or characters
+ * encoded by the kitty keyboard protocol ("\x1b[<codepoint>u" with no or
+ * only the shift modifier). Navigation and control keys are not text input
+ * and must not replace an active selection.
+ */
+function isTextInput(data: string): boolean {
+  if (data.length === 0) return false;
+  const kitty = /^\x1b\[(\d+)(?:;(\d+))?u$/.exec(data);
+  if (kitty) {
+    const codepoint = Number(kitty[1]);
+    const mods = kitty[2] === undefined ? 1 : Number(kitty[2]);
+    return codepoint >= 32 && (mods === 1 || mods === 2);
+  }
+  return !/[\x00-\x1f\x7f]/.test(data);
+}
+
 function bracketedPasteContent(data: string): string | null {
   const startMarker = "\x1b[200~";
   const endMarker = "\x1b[201~";
@@ -183,10 +200,17 @@ export class PowerlineEditor extends CustomEditor {
         return;
       }
 
-      // Any printable character: delete selection first, then insert
-      if (this.deleteKeyboardSelectionIfAny() || this.deleteSelectionIfAny() || this.deleteFullscreenSelectionIfAny()) {
+      // Plain navigation collapses an active selection (mouse or keyboard)
+      // instead of deleting its content, like any editor.
+      if (!isKeyRelease(data) && this.isPlainMovementKey(data)) {
+        this.collapseSelections();
+        super.handleInput(data);
+        return;
+      }
+
+      // Typing replaces an active selection: delete it first, then insert.
+      if (isTextInput(data) && (this.deleteKeyboardSelectionIfAny() || this.deleteSelectionIfAny() || this.deleteFullscreenSelectionIfAny())) {
         this.resetKeyboardSelectionState();
-        // After deletion, re-insert the character via super
         super.handleInput(data);
         return;
       }
@@ -364,12 +388,6 @@ export class PowerlineEditor extends CustomEditor {
 
     if (isKeyRelease(data)) return false;
 
-    if (this.keyboardSelecting && this.isPlainMovementKey(data)) {
-      // Plain navigation collapses the keyboard selection, like any editor.
-      this.clearKeyboardSelection();
-      return false;
-    }
-
     if (matchesKey(data, "ctrl+x")) {
       if (this.optionsRef.renderFrameBar) {
         const tui = Reflect.get(this, "tui");
@@ -463,9 +481,39 @@ export class PowerlineEditor extends CustomEditor {
     if (typeof tui.requestRender === "function") tui.requestRender();
   }
 
-  /** Collapse the keyboard selection (keeps the editor cursor where it is). */
-  private clearKeyboardSelection(): void {
-    if (!this.keyboardSelecting) return;
+  /**
+   * True when a screen row is inside the fullscreen editor's visible text
+   * rows. Used to restrict the selection-drop (cursor move on mouse release)
+   * to releases over the editor, so other components never see a synthetic
+   * click.
+   */
+  isFullscreenTextRow(row: number): boolean {
+    if (!this.optionsRef.renderFrameBar) return false;
+    try {
+      const tui = Reflect.get(this, "tui");
+      const cursorScreenRow = Reflect.get(tui, "beautypiCursorScreenRow");
+      const visibleLineCount = Number(Reflect.get(this, "renderedVisibleLineCount") ?? 0);
+      const layoutWidth = Number(Reflect.get(this, "lastWidth") ?? 0);
+      const layoutFn = Reflect.get(this, "layoutText");
+      if (typeof cursorScreenRow !== "number" || visibleLineCount < 1 || layoutWidth < 1) return false;
+      if (typeof layoutFn !== "function") return false;
+      const layoutLines: Array<{ hasCursor?: boolean }> = layoutFn.call(this, layoutWidth);
+      if (!Array.isArray(layoutLines) || layoutLines.length === 0) return false;
+      let cursorLineIndex = layoutLines.findIndex((line) => line.hasCursor === true);
+      if (cursorLineIndex < 0) cursorLineIndex = 0;
+      const topScreenRow = cursorScreenRow - cursorLineIndex;
+      return row >= topScreenRow && row < topScreenRow + visibleLineCount;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Clear any active selection without deleting text: keyboard bookkeeping,
+   * the fullscreen renderer's mouse selection and the regular compositor's
+   * editor selection.
+   */
+  private collapseSelections(): void {
     this.resetKeyboardSelectionState();
     this.compositorRef?.clearEditorSelection?.();
     if (!this.optionsRef.renderFrameBar) return;

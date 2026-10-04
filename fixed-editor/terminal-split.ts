@@ -851,6 +851,12 @@ export class TerminalSplitCompositor {
 
     this.preserveSelectionFocusOnRelease = false;
     this.selectionDragging = false;
+    // A drag ends wherever the pointer is: move the editor cursor to the
+    // release point (which is not necessarily the end of the marked range).
+    if (location && this.isOnEditorTextLocation(location)) {
+      const editorTextStart = this.lastClusterRender!.editorTextStart!;
+      this.onEditorTextClick?.(packet.col, location.point.line - editorTextStart);
+    }
     const selectedText = this.getSelectedText();
     if (selectedText) {
       this.lastLeftPress = null;
