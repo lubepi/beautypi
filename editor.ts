@@ -213,24 +213,29 @@ export class PowerlineEditor extends CustomEditor {
           ? (text: string) => String(editorBorder(text))
           : (text: string) => text;
 
-      // Blink phase: drop Pi's inverse cursor cell while the soft cursor is
-      // hidden so the frame blinks like the regular-mode cluster (Pi itself
-      // never blinks the fullscreen cursor).
+      // Blink phase and cursor-cell normalization. Pi writes the cursor cell
+      // as "\x1b[7m<char>\x1b[0m" — a full SGR reset in the middle of the line.
+      // Inside a selection highlight the renderer rebuilds the line and turns
+      // that into reset/re-enable cascades; Ghostty mishandles them (the text
+      // after the cell flickers with the blink). Use the selective inverse-off
+      // instead — the highlight rebuild re-enables inverse by itself — and
+      // drop the inverse entirely while the soft cursor is hidden.
       const blinkVisible = this.optionsRef.cursorBlinkVisible;
-      const stripHiddenCursor = (row: string): string => {
-        if (!blinkVisible || blinkVisible()) return row;
+      const adjustCursorCell = (row: string): string => {
         const markerIndex = row.indexOf(CURSOR_MARKER);
         if (markerIndex < 0) return row;
         const before = row.slice(0, markerIndex + CURSOR_MARKER.length);
         const after = row.slice(markerIndex + CURSOR_MARKER.length);
-        return before + after.replace(/^\x1b\[7m[\s\S]*?\x1b\[0m/, (match) => match.slice(4, -4));
+        const visible = !blinkVisible || blinkVisible();
+        return before + after.replace(/^\x1b\[7m[\s\S]*?\x1b\[0m/, (match) =>
+          visible ? `${match.slice(0, -4)}\x1b[27m` : match.slice(4, -4));
       };
 
       const lines: string[] = [barLine];
       for (const row of textRows.slice(0, -1)) {
-        lines.push(frameBodyRow(stripHiddenCursor(row), width, border));
+        lines.push(frameBodyRow(adjustCursorCell(row), width, border));
       }
-      lines.push(frameCapRow(stripHiddenCursor(textRows[textRows.length - 1] ?? ""), width, border, hiddenLineCount(bottomRow, "↓")));
+      lines.push(frameCapRow(adjustCursorCell(textRows[textRows.length - 1] ?? ""), width, border, hiddenLineCount(bottomRow, "↓")));
       lines.push(...autocompleteRows);
       return lines;
     } catch {
